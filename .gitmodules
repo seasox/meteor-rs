@@ -1,0 +1,3 @@
+[submodule "lib/llm"]
+	path = lib/llm
+	url = https://github.com/seasox/llm
