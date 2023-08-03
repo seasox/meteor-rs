@@ -3,8 +3,6 @@ use log::debug;
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
-use std::rc::Weak;
-use std::sync::Mutex;
 
 type TokenId = u32;
 type Token = Vec<u8>;
@@ -19,11 +17,11 @@ pub struct TokenTrie {
 
 pub trait Trie {
     type Node;
-    fn lookup(&self, token: &TokenId) -> Result<Self::Node>;
+    fn lookup(&self, token: &TokenId) -> Option<&Self::Node>;
     fn new(tokens: Vec<(TokenId, Token)>) -> Result<Self>
     where
         Self: Sized;
-    fn update(&mut self, probabilities: Vec<(TokenId, Prob)>) -> Result<()>;
+    fn update(&mut self, probabilities: Vec<(TokenId, Prob)>);
     fn tokens(&self) -> Vec<TokenId>;
     fn probabilities(&self) -> Vec<Prob>;
     fn distribution(&self) -> Vec<(TokenId, Vec<TokenId>, Prob)>;
@@ -41,8 +39,8 @@ impl Default for TokenTrie {
 impl Trie for TokenTrie {
     type Node = TrieNode;
     /// Look up a TokenId in this trie
-    fn lookup(&self, token: &TokenId) -> Result<TrieNode> {
-        todo!("implement DFS")
+    fn lookup(&self, token: &TokenId) -> Option<&TrieNode> {
+        self.root.lookup(token)
     }
 
     /// Constructor for TokenTrie
@@ -56,14 +54,9 @@ impl Trie for TokenTrie {
     }
 
     /// Update this trie with new token probabilities
-    fn update(&mut self, probabilities: Vec<(TokenId, Prob)>) -> Result<()> {
+    fn update(&mut self, probabilities: Vec<(TokenId, Prob)>) {
         // update all probabilities according to arg
-        todo!("update");
-        /*let it = probabilities.iter();
-        self.lookup.iter_mut().for_each(|(id, t)| {
-            t.probability = it.find(|(k, _)| k == id).map(|(_, p)| *p);
-        });
-        Ok(())*/
+        self.root.update(&probabilities)
     }
 
     fn tokens(&self) -> Vec<TokenId> {
@@ -97,6 +90,17 @@ impl TrieNode {
             probability,
         }
     }
+    fn lookup(&self, id: &TokenId) -> Option<&TrieNode> {
+        if self.token_id.is_some_and(|x| x.eq(id)) {
+            return Some(self);
+        }
+        self.edges
+            .iter()
+            .map(|(_, n)| n.lookup(id))
+            .find(|n| n.is_some())
+            .map(|n| n.unwrap())
+    }
+
     fn tokens(&self) -> Vec<TokenId> {
         let mut ret: Vec<TokenId> = self.token_id.iter().cloned().collect();
         for edge in self.edges.values() {
@@ -208,6 +212,18 @@ impl TrieNode {
             }
         };
     }
+    fn update(&mut self, probabilities: &Vec<(TokenId, Prob)>) {
+        self.probability = match self.token_id {
+            Some(id) => probabilities
+                .iter()
+                .find(|(t, _)| id.eq(t))
+                .map(|(_, p)| *p),
+            None => None,
+        };
+        self.edges
+            .iter_mut()
+            .for_each(|(_, n)| n.update(probabilities));
+    }
 }
 
 impl TrieNode {
@@ -314,7 +330,7 @@ mod tests {
         ]);
         let mut trie = TokenTrie::new(args)?;
         println!("{:?}", trie);
-        trie.update(probs.into_iter().collect())?;
+        trie.update(probs.into_iter().collect());
         let d = trie.distribution();
         let reprs: Vec<TokenId> = d.iter().map(|x| x.0.clone()).collect();
         let tokens: Vec<Vec<TokenId>> = d.iter().map(|x| x.1.clone()).collect();
@@ -364,7 +380,7 @@ mod tests {
     fn test_resample() -> Result<()> {
         let args = create_tokens(vec!["Alice", "an", "ant"]);
         let mut trie = TokenTrie::new(args)?;
-        trie.update(vec![(0, 1f64), (1, 2f64), (2, 5f64)])?;
+        trie.update(vec![(0, 1f64), (1, 2f64), (2, 5f64)]);
 
         let d = trie.distribution();
         let reprs: Vec<TokenId> = d.iter().cloned().map(|x| x.0).collect();
@@ -375,7 +391,7 @@ mod tests {
         assert_eq!(tokens[1], vec![1, 2]);
         assert_eq!(probs[1], 7f64);
 
-        let lookup_node = trie.lookup(&reprs[1])?;
+        let lookup_node = trie.lookup(&reprs[1]).unwrap();
         assert_eq!(tokens[1], lookup_node.tokens());
         assert_eq!(probs[1], lookup_node.probabilities().iter().sum::<f64>());
 
@@ -386,7 +402,7 @@ mod tests {
     fn test_resample_deep() -> Result<()> {
         let args = create_tokens(vec!["a", "alice", "an", "ant", "bob"]);
         let mut trie = TokenTrie::new(args)?;
-        trie.update(vec![(0, 1f64), (1, 3f64), (2, 3f64), (3, 4f64), (4, 5f64)])?;
+        trie.update(vec![(0, 1f64), (1, 3f64), (2, 3f64), (3, 4f64), (4, 5f64)]);
 
         let d = trie.distribution();
         let reprs: Vec<TokenId> = d.iter().cloned().map(|x| x.0).collect();
@@ -411,7 +427,7 @@ mod tests {
             (3, 5f64),
             (4, 7f64),
             (5, 1f64),
-        ])?;
+        ]);
 
         let d = trie.distribution();
         let reprs: Vec<TokenId> = d.iter().cloned().map(|x| x.0).collect();
@@ -422,7 +438,7 @@ mod tests {
         assert_eq!(tokens[0], vec![5, 2, 0, 1, 3]);
         assert_eq!(probs[0], 16f64);
 
-        let lookup_node = trie.lookup(&reprs[0])?;
+        let lookup_node = trie.lookup(&reprs[0]).unwrap();
         assert_eq!(tokens[0], lookup_node.tokens());
         assert_eq!(probs[0], lookup_node.probabilities().iter().sum::<f64>());
 
@@ -435,7 +451,7 @@ mod tests {
         assert_eq!(st_reprs[0], 5);
         assert_eq!(st_probs[0], 16f64);
 
-        let st_lookup_node = trie.lookup(&st_reprs[0])?;
+        let st_lookup_node = trie.lookup(&st_reprs[0]).unwrap();
         assert_eq!(st_tokens[0], st_lookup_node.tokens());
         assert_eq!(
             st_probs[0],
@@ -449,7 +465,7 @@ mod tests {
     fn test_resample_multi_split_pseudo() -> Result<()> {
         let tokens = create_tokens(vec!["alice", "an", "albert", "ant", "bob"]);
         let mut trie = TokenTrie::new(tokens)?;
-        trie.update(vec![(0, 3f64), (1, 3f64), (2, 4f64), (3, 5f64), (4, 7f64)])?;
+        trie.update(vec![(0, 3f64), (1, 3f64), (2, 4f64), (3, 5f64), (4, 7f64)]);
 
         println!("{:?}", trie);
 
@@ -465,7 +481,7 @@ mod tests {
         assert_eq!(probs[2], 8f64);
 
         let lookup_node = trie.lookup(&reprs[2]);
-        assert!(lookup_node.is_ok());
+        assert!(lookup_node.is_some());
 
         let d = lookup_node.unwrap().distribution();
         let st_reprs: Vec<TokenId> = d.iter().cloned().map(|x| x.0).collect();
@@ -479,7 +495,7 @@ mod tests {
         assert_eq!(st_reprs.len(), 1);
 
         let st_lookup_node = trie.lookup(&st_reprs[0]);
-        assert!(st_lookup_node.is_ok());
+        assert!(st_lookup_node.is_some());
         assert_eq!(
             st_probs[0],
             st_lookup_node.unwrap().probabilities().iter().sum::<f64>()
@@ -493,9 +509,9 @@ mod tests {
         let tokens = create_tokens(vec!["ABC", "AB"]);
         let mut trie = TokenTrie::new(tokens)?;
         let probs = vec![(0, 2f64), (1, 3f64)];
-        trie.update(probs)?;
+        trie.update(probs);
 
-        let lookup_node = trie.lookup(&1)?;
+        let lookup_node = trie.lookup(&1).unwrap();
         assert_eq!(lookup_node.token_id, Some(1));
         assert_eq!(lookup_node.probability, Some(3f64));
         assert!(!lookup_node.edges.contains_key(&vec![]));
@@ -508,7 +524,7 @@ mod tests {
         let tokens = create_tokens(vec!["Alice", "an", "ant", "a"]);
         let mut trie = TokenTrie::new(tokens)?;
         let probs = vec![(0, 1.0), (1, 4.0), (2, 7.0), (3, 22.0)];
-        trie.update(probs)?;
+        trie.update(probs);
         println!("{:?}", trie);
 
         let d = trie.distribution();
@@ -521,7 +537,7 @@ mod tests {
         assert_eq!(tokens, vec![vec![0], vec![3, 1, 2]]);
         assert_eq!(probs, vec![1.0, 33.0]);
 
-        let lookup_node = trie.lookup(&3)?;
+        let lookup_node = trie.lookup(&3).unwrap();
         let d = lookup_node.distribution();
         let reprs: Vec<TokenId> = d.iter().cloned().map(|x| x.0).collect();
         let tokens: Vec<Vec<TokenId>> = d.iter().cloned().map(|x| x.1).collect();
@@ -541,7 +557,7 @@ mod tests {
         let tokens = create_tokens(vec!["Alice", "an", "ant", "a"]);
         let mut trie = TokenTrie::new(tokens)?;
         let probs = vec![(0, 1.0), (1, 4.0), (2, 7.0), (3, 22.0)];
-        trie.update(probs)?;
+        trie.update(probs);
 
         println!("{:?}", trie);
 
@@ -554,13 +570,13 @@ mod tests {
         assert_eq!(tokens, vec![vec![0], vec![3, 1, 2]]);
         assert_eq!(probs, vec![1.0, 33.0]);
 
-        trie.update(vec![])?;
+        trie.update(vec![]);
         assert_eq!(
             trie.distribution(),
             vec![(0, vec![0], 0f64), (3, vec![3, 1, 2], 0f64)]
         );
 
-        trie.update(vec![(2, 22.0)])?;
+        trie.update(vec![(2, 22.0)]);
         let d = trie.distribution();
         let reprs: Vec<TokenId> = d.iter().cloned().map(|x| x.0).collect();
         let tokens: Vec<Vec<TokenId>> = d.iter().cloned().map(|x| x.1).collect();
