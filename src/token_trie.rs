@@ -16,8 +16,6 @@ pub struct TokenTrie {
     lookup: HashMap<TokenId, Weak<RefCell<TrieNode>>>,
 }
 
-trait TNode {}
-
 pub trait Trie {
     type Node;
     fn lookup(&self, token: &TokenId) -> Result<Rc<RefCell<Self::Node>>>;
@@ -28,6 +26,15 @@ pub trait Trie {
     fn tokens(&self) -> Vec<TokenId>;
     fn probabilities(&self) -> Vec<Prob>;
     fn distribution(&self) -> Vec<(TokenId, Vec<TokenId>, Prob)>;
+}
+
+impl Default for TokenTrie {
+    fn default() -> Self {
+        TokenTrie {
+            root: Rc::new(RefCell::new(TrieNode::new(None, None, None))),
+            lookup: Default::default(),
+        }
+    }
 }
 
 impl Trie for TokenTrie {
