@@ -1,5 +1,4 @@
 use crate::token_trie::TokenTrie;
-use crate::KEY_BYTES;
 use llm::{Sampler, TokenBias, TokenId};
 use partial_sort::PartialSort;
 use rand::distributions::{Distribution, WeightedIndex};
@@ -26,7 +25,7 @@ struct MeteorSampler {
     /// the token trie to sample from
     trie: TokenTrie,
     /// the byte array to embed (e.g. a ciphertext of a hidden message)
-    embed: Vec<u8>,
+    ciphertext: Vec<u8>,
 }
 
 impl Default for MeteorSampler {
@@ -39,7 +38,7 @@ impl Default for MeteorSampler {
             bias_tokens: TokenBias::empty(),
             repetition_penalty_last_n: 512,
             trie: Default::default(),
-            embed: vec![],
+            ciphertext: vec![],
         }
     }
 }
@@ -103,11 +102,10 @@ impl MeteorSampler {
             logits_id.truncate(top_k);
         }
 
-        let maxl = logits_id
-            .iter()
-            .map(|x| x.0)
-            .max_by(f32::total_cmp)
-            .unwrap();
+        let token_weights = logits_id.iter().map(|x| x.0);
+        let mut token_ids: Vec<TokenId> = logits_id.iter().map(|x| x.1).collect();
+
+        let maxl = token_weights.max_by(f32::total_cmp).unwrap();
 
         // compute probs for the top K tokens
         let mut probs: Vec<f32> = logits_id
@@ -129,6 +127,7 @@ impl MeteorSampler {
                 cumsum += probs[i];
                 if cumsum >= top_p {
                     probs.truncate(i + 1);
+                    token_ids.truncate(i + 1);
                     logits_id.truncate(i + 1);
                     break;
                 }
@@ -156,6 +155,18 @@ impl Default for MeteorSamplerContainer {
     fn default() -> Self {
         MeteorSamplerContainer {
             inner: Mutex::new(MeteorSampler::default()),
+        }
+    }
+}
+
+impl MeteorSamplerContainer {
+    pub fn new(trie: TokenTrie, ciphertext: Vec<u8>) -> Self {
+        MeteorSamplerContainer {
+            inner: Mutex::new(MeteorSampler {
+                trie,
+                ciphertext,
+                ..Default::default()
+            }),
         }
     }
 }

@@ -3,6 +3,8 @@ mod token_trie;
 
 use crate::meteor_sampler::MeteorSamplerContainer;
 use crate::token_trie::{TokenTrie, Trie};
+use aes_gcm::aead::Aead;
+use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit};
 use anyhow::Result;
 use clap::Parser;
 use env_logger;
@@ -66,6 +68,19 @@ impl Display for InferenceCallbackError {
 
 impl Error for InferenceCallbackError {}
 
+#[derive(Debug)]
+enum MeteorError {
+    EncryptionFailure,
+}
+
+impl Display for MeteorError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for MeteorError {}
+
 fn main() -> Result<()> {
     env_logger::init();
     debug!("Parse CLI args");
@@ -127,14 +142,25 @@ fn mode_inference<M: Model>(model: M, context: &str) -> Result<()> {
     Ok(())
 }
 
-fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, _msg: &str) -> Result<()> {
+fn encrypt(key: [u8; KEY_BYTES], msg: &str) -> Result<Vec<u8>, MeteorError> {
+    let key = Key::<Aes256Gcm>::from_slice(&key);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Aes256Gcm::generate_nonce(rand::thread_rng());
+    cipher
+        .encrypt(&nonce, msg.as_ref())
+        .map_err(|_| MeteorError::EncryptionFailure)
+}
+
+fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, msg: &str) -> Result<()> {
     info!("Loading key file {}...", key_file);
-    let _key = load_key(key_file)?;
+    let key = load_key(key_file)?;
     info!("Loading tokenizer...");
     let tokenizer = model.tokenizer();
     let tokens = tokenizer.get_tokens();
     info!("Loaded tokenizer with {} tokens", tokens.len());
-    let _trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
+    let trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
+    let ciphertext = encrypt(key, msg)?;
+
     let mut session = model.start_session(Default::default());
     let mut s = String::new();
     let res = session.infer(
@@ -143,7 +169,7 @@ fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, _msg: &str) ->
         &llm::InferenceRequest {
             prompt: Prompt::Text(context),
             parameters: &InferenceParameters {
-                sampler: Arc::new(MeteorSamplerContainer::default()), // TODO pass trie, key, and msg here
+                sampler: Arc::new(MeteorSamplerContainer::new(trie, ciphertext)),
             },
             play_back_previous_tokens: true,
             maximum_token_count: None,
@@ -178,7 +204,7 @@ fn mode_decode<M: Model>(model: M, _context: &str, key_file: &str, stego_text: &
     todo!("Decode")
 }
 
-const KEY_BYTES: usize = 128;
+const KEY_BYTES: usize = 32;
 fn load_key(filename: &str) -> Result<[u8; KEY_BYTES]> {
     let f = File::open(filename);
     return match f {
