@@ -1,14 +1,14 @@
 use log::debug;
 
 use anyhow::{bail, Result};
-use rand::distributions::WeightedIndex;
+use rand::distributions::{WeightedError, WeightedIndex};
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 
 type TokenId = u32;
 type Token = Vec<u8>;
 type Label = Token;
-type Prob = f64;
+pub type Prob = f32;
 
 pub struct TokenTrie {
     root: TrieNode,
@@ -345,6 +345,12 @@ mod tests {
         ret
     }
 
+    fn create_probs(tokens: &Vec<(TokenId, Token)>, probs: Vec<i32>) -> Vec<(TokenId, Prob)> {
+        assert_eq!(tokens.len(), probs.len()); // test impl error, not test failure!
+        let probs: Vec<Prob> = probs.iter().map(|x| *x as Prob).collect();
+        tokens.iter().map(|x| x.0).zip(probs).collect()
+    }
+
     #[test]
     fn test_webex() -> Result<()> {
         init();
@@ -409,8 +415,9 @@ mod tests {
     #[test]
     fn test_resample() -> Result<()> {
         let args = create_tokens(vec!["Alice", "an", "ant"]);
+        let probs = create_probs(&args, vec![1, 2, 5]);
         let mut trie = TokenTrie::new(args)?;
-        trie.update(vec![(0, 1f64), (1, 2f64), (2, 5f64)]);
+        trie.update(probs);
 
         let d = trie.distribution();
         let reprs = d.reprs;
@@ -419,11 +426,11 @@ mod tests {
 
         assert_eq!(reprs[1], 1);
         assert_eq!(tokens[1], vec![1, 2]);
-        assert_eq!(probs[1], 7f64);
+        assert_eq!(probs[1], 7 as Prob);
 
         let lookup_node = trie.lookup(&reprs[1]).unwrap();
         assert_eq!(tokens[1], lookup_node.tokens());
-        assert_eq!(probs[1], lookup_node.probabilities().iter().sum::<f64>());
+        assert_eq!(probs[1], lookup_node.probabilities().iter().sum::<Prob>());
 
         Ok(())
     }
@@ -431,8 +438,9 @@ mod tests {
     #[test]
     fn test_resample_deep() -> Result<()> {
         let args = create_tokens(vec!["a", "alice", "an", "ant", "bob"]);
+        let probs = create_probs(&args, vec![1, 3, 3, 4, 5]);
         let mut trie = TokenTrie::new(args)?;
-        trie.update(vec![(0, 1f64), (1, 3f64), (2, 3f64), (3, 4f64), (4, 5f64)]);
+        trie.update(probs);
 
         let d = trie.distribution();
         let reprs = d.reprs;
@@ -441,7 +449,7 @@ mod tests {
 
         assert_eq!(reprs[0], 0);
         assert_eq!(tokens[0], vec![0, 1, 2, 3]);
-        assert_eq!(probs[0], 11f64);
+        assert_eq!(probs[0], 11 as Prob);
 
         Ok(())
     }
@@ -449,15 +457,9 @@ mod tests {
     #[test]
     fn test_resample_multi_split() -> Result<()> {
         let args = create_tokens(vec!["alice", "an", "albert", "ant", "bob", "a"]);
+        let probs = create_probs(&args, vec![3, 3, 4, 5, 7, 1]);
         let mut trie = TokenTrie::new(args)?;
-        trie.update(vec![
-            (0, 3f64),
-            (1, 3f64),
-            (2, 4f64),
-            (3, 5f64),
-            (4, 7f64),
-            (5, 1f64),
-        ]);
+        trie.update(probs);
 
         let d = trie.distribution();
         let reprs = d.reprs;
@@ -466,11 +468,11 @@ mod tests {
 
         assert_eq!(reprs[0], 5);
         assert_eq!(tokens[0], vec![5, 2, 0, 1, 3]);
-        assert_eq!(probs[0], 16f64);
+        assert_eq!(probs[0], 16 as Prob);
 
         let lookup_node = trie.lookup(&reprs[0]).unwrap();
         assert_eq!(tokens[0], lookup_node.tokens());
-        assert_eq!(probs[0], lookup_node.probabilities().iter().sum::<f64>());
+        assert_eq!(probs[0], lookup_node.probabilities().iter().sum::<Prob>());
 
         let d = lookup_node.distribution();
         let reprs = d.reprs;
@@ -479,11 +481,14 @@ mod tests {
 
         assert_eq!(tokens[0], vec![5, 2, 0, 1, 3]);
         assert_eq!(reprs[0], 5);
-        assert_eq!(probs[0], 16f64);
+        assert_eq!(probs[0], 16 as Prob);
 
         let st_lookup_node = trie.lookup(&reprs[0]).unwrap();
         assert_eq!(tokens[0], st_lookup_node.tokens());
-        assert_eq!(probs[0], st_lookup_node.probabilities().iter().sum::<f64>());
+        assert_eq!(
+            probs[0],
+            st_lookup_node.probabilities().iter().sum::<Prob>()
+        );
 
         Ok(())
     }
@@ -491,8 +496,9 @@ mod tests {
     #[test]
     fn test_resample_multi_split_pseudo() -> Result<()> {
         let tokens = create_tokens(vec!["alice", "an", "albert", "ant", "bob"]);
+        let probs = create_probs(&tokens, vec![3, 3, 4, 5, 7]);
         let mut trie = TokenTrie::new(tokens)?;
-        trie.update(vec![(0, 3f64), (1, 3f64), (2, 4f64), (3, 5f64), (4, 7f64)]);
+        trie.update(probs);
 
         println!("{:?}", trie);
 
@@ -502,7 +508,7 @@ mod tests {
 
         assert_eq!(d.reprs[2], 1);
         assert_eq!(d.tokens[2], vec![1, 3]);
-        assert_eq!(d.probs[2], 8f64);
+        assert_eq!(d.probs[2], 8 as Prob);
 
         let lookup_node = trie.lookup(&d.reprs[2]);
         assert!(lookup_node.is_some());
@@ -514,7 +520,7 @@ mod tests {
 
         assert_eq!(tokens[0], vec![1, 3]);
         assert_eq!(reprs[0], 1);
-        assert_eq!(probs[0], 8f64);
+        assert_eq!(probs[0], 8 as Prob);
         assert_eq!(probs.len(), 1);
         assert_eq!(reprs.len(), 1);
 
@@ -522,7 +528,7 @@ mod tests {
         assert!(st_lookup_node.is_some());
         assert_eq!(
             probs[0],
-            st_lookup_node.unwrap().probabilities().iter().sum::<f64>()
+            st_lookup_node.unwrap().probabilities().iter().sum::<Prob>()
         );
 
         Ok(())
@@ -531,13 +537,13 @@ mod tests {
     #[test]
     fn test_empty_label_split() -> Result<()> {
         let tokens = create_tokens(vec!["ABC", "AB"]);
+        let probs = create_probs(&tokens, vec![2, 3]);
         let mut trie = TokenTrie::new(tokens)?;
-        let probs = vec![(0, 2f64), (1, 3f64)];
         trie.update(probs);
 
         let lookup_node = trie.lookup(&1).unwrap();
         assert_eq!(lookup_node.token_id, Some(1));
-        assert_eq!(lookup_node.probability, Some(3f64));
+        assert_eq!(lookup_node.probability, Some(3 as Prob));
         assert!(!lookup_node.edges.contains_key(&vec![]));
 
         Ok(())
@@ -594,7 +600,7 @@ mod tests {
             Distribution {
                 reprs: vec![0, 3],
                 tokens: vec![vec![0], vec![3, 1, 2]],
-                probs: vec![0f64, 0f64],
+                probs: vec![0 as Prob, 0 as Prob],
             }
         );
 
