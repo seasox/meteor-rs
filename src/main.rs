@@ -1,5 +1,7 @@
+mod meteor_sampler;
 mod token_trie;
 
+use crate::meteor_sampler::MeteorSamplerContainer;
 use crate::token_trie::{TokenTrie, Trie};
 use anyhow::Result;
 use clap::Parser;
@@ -7,10 +9,10 @@ use env_logger;
 use llm;
 use llm::{
     InferenceFeedback, InferenceParameters, InferenceResponse, Model, ModelParameters, Prompt,
-    Sampler, TokenId, Tokenizer, TokenizerSource,
+    TokenId, Tokenizer, TokenizerSource,
 };
 use log::{debug, info};
-use rand::{thread_rng, Rng, RngCore};
+use rand::Rng;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -18,7 +20,7 @@ use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 #[derive(Debug, Parser)]
 #[clap(version = "1.0", author = "Jeremy Boy <github@jboy.eu>")]
@@ -59,40 +61,6 @@ enum InferenceCallbackError {}
 impl Display for InferenceCallbackError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
-    }
-}
-
-#[derive(Debug)]
-struct MeteorSampler {
-    state: u8,
-}
-
-impl MeteorSampler {
-    fn sample(
-        &mut self,
-        _previous_tokens: &[TokenId],
-        _logits: &[f32],
-        _rng: &mut dyn RngCore,
-    ) -> TokenId {
-        self.state += 1;
-        todo!()
-    }
-}
-
-#[derive(Debug)]
-struct MeteorSamplerContainer {
-    inner: Mutex<MeteorSampler>,
-}
-
-impl Sampler for MeteorSamplerContainer {
-    fn sample(
-        &self,
-        previous_tokens: &[TokenId],
-        logits: &[f32],
-        rng: &mut dyn RngCore,
-    ) -> TokenId {
-        let mut sampler = self.inner.lock().unwrap();
-        sampler.sample(previous_tokens, logits, rng)
     }
 }
 
@@ -159,6 +127,57 @@ fn mode_inference<M: Model>(model: M, context: &str) -> Result<()> {
     Ok(())
 }
 
+fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, _msg: &str) -> Result<()> {
+    info!("Loading key file {}...", key_file);
+    let _key = load_key(key_file)?;
+    info!("Loading tokenizer...");
+    let tokenizer = model.tokenizer();
+    let tokens = tokenizer.get_tokens();
+    info!("Loaded tokenizer with {} tokens", tokens.len());
+    let _trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
+    let mut session = model.start_session(Default::default());
+    let mut s = String::new();
+    let res = session.infer(
+        &model,
+        &mut rand::thread_rng(),
+        &llm::InferenceRequest {
+            prompt: Prompt::Text(context),
+            parameters: &InferenceParameters {
+                sampler: Arc::new(MeteorSamplerContainer::default()), // TODO pass trie, key, and msg here
+            },
+            play_back_previous_tokens: true,
+            maximum_token_count: None,
+        },
+        // llm::OutputRequest
+        &mut Default::default(),
+        |t| -> Result<InferenceFeedback, InferenceCallbackError> {
+            match t {
+                InferenceResponse::InferredToken(t) | InferenceResponse::PromptToken(t) => {
+                    s.push_str(&t);
+                }
+                _ => {}
+            }
+            Ok(InferenceFeedback::Continue)
+        },
+    )?;
+    println!("\n\nInference stats:\n{res}");
+    println!("{}", s);
+    Ok(())
+}
+
+fn mode_decode<M: Model>(model: M, _context: &str, key_file: &str, stego_text: &str) -> Result<()> {
+    info!("Loading key file {}...", key_file);
+    let _key = load_key(key_file)?;
+    info!("Loading tokenizer...");
+    let tokenizer = model.tokenizer();
+    let tokens = tokenizer.get_tokens();
+    info!("Loaded tokenizer with {} tokens", tokens.len());
+    let _trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
+    let tokenization = tokenizer.tokenize(stego_text, false)?;
+    info!("Tokenization: {:?}", tokenization);
+    todo!("Decode")
+}
+
 const KEY_BYTES: usize = 128;
 fn load_key(filename: &str) -> Result<[u8; KEY_BYTES]> {
     let f = File::open(filename);
@@ -181,26 +200,6 @@ fn load_key(filename: &str) -> Result<[u8; KEY_BYTES]> {
             Ok(random_bytes)
         }
     };
-}
-
-fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, msg: &str) -> Result<()> {
-    info!("Loading key file {}...", key_file);
-    let key = load_key(key_file)?;
-    info!("Loading tokenizer...");
-    let tokenizer = model.tokenizer();
-    let tokens = tokenizer.get_tokens();
-    info!("Loaded tokenizer with {} tokens", tokens.len());
-    let trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
-    todo!("Encode")
-}
-
-fn mode_decode<M: Model>(model: M, context: &str, key_file: &str, stego_text: &str) -> Result<()> {
-    info!("Loading key file {}...", key_file);
-    let key = load_key(key_file)?;
-    info!("Loading tokenizer...");
-    let tokenizer = model.tokenizer();
-    let tokens = tokenizer.get_tokens();
-    todo!("Decode")
 }
 
 trait GetTokens<TokenId, Token> {

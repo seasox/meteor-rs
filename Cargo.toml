@@ -11,4 +11,5 @@ clap = { version = "4.3.16", features = ["derive"] }
 env_logger = "0.10.0"
 llm = { path = "lib/llm/crates/llm", features = [ "metal" ] }
 log = "0.4.19"
+partial_sort = "0.2.0"
 rand = "0.8.5"
