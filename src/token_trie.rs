@@ -271,8 +271,44 @@ impl TrieNode {
     }
 }
 
+#[derive(Copy, Clone)]
+enum TrieFormatFilter {
+    //All,
+    WithProbOnly,
+}
+
+impl TrieFormatFilter {
+    fn filter(&self, node: &TrieNode) -> bool {
+        return match self {
+            //TrieFormatFilter::All => true,
+            WithProbOnly => node.probabilities().iter().any(|p| *p > 0f32),
+        };
+    }
+}
+
+impl TokenTrie {
+    fn format_debug(
+        &self,
+        self_label: &Label,
+        level: usize,
+        max_depth: Option<usize>,
+        filter: TrieFormatFilter,
+    ) -> String {
+        format!(
+            "{}",
+            self.root.format_debug(self_label, level, max_depth, filter)
+        )
+    }
+}
+
 impl TrieNode {
-    fn format_debug(&self, self_label: &Label, level: usize, max_depth: Option<usize>) -> String {
+    fn format_debug(
+        &self,
+        self_label: &Label,
+        level: usize,
+        max_depth: Option<usize>,
+        filter: TrieFormatFilter,
+    ) -> String {
         let mut label = format!("{:?}", self_label);
         if let Some(token_id) = &self.token_id {
             label += &format!(" ({:?}", token_id);
@@ -284,21 +320,25 @@ impl TrieNode {
             }
             label += &")".to_owned();
         }
-        let indent = "  ".repeat(level);
-        let mut tr = label;
+        let mut tr = if level > 0 {
+            let indent = "  ".repeat(level - 1);
+            format!("\n{}├─", indent)
+        } else {
+            String::new()
+        };
+        tr += label.as_str();
         let depth = self.depth();
         if let Some(max_depth) = max_depth {
             if level > max_depth && depth > 0 {
-                tr += &format!("\n{}├── ... ({} levels)", indent, depth);
+                tr += &format!("... ({} levels)", depth);
                 return tr;
             }
         }
         for (label, n) in &self.edges {
-            tr += &format!(
-                "\n{}├── {}",
-                indent,
-                n.format_debug(label, level + 1, max_depth)
-            )
+            let child_incl = filter.filter(n);
+            if child_incl {
+                tr += &n.format_debug(label, level + 1, max_depth, filter);
+            }
         }
         tr
     }
@@ -331,14 +371,9 @@ fn find_common_prefix<T: PartialEq + Clone>(vec1: &[T], vec2: &[T]) -> Vec<T> {
 
 impl Debug for TokenTrie {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.root)
-    }
-}
-
-impl Debug for TrieNode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         const MAX_DEPTH: Option<usize> = None;
-        write!(f, "{}", self.format_debug(&vec![], 0, MAX_DEPTH))
+        const FILTER: TrieFormatFilter = WithProbOnly;
+        write!(f, "{}", self.format_debug(&vec![], 0, MAX_DEPTH, FILTER))
     }
 }
 
