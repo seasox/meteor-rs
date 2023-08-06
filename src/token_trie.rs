@@ -194,7 +194,7 @@ impl TrieNode {
             Some((edge, node)) => {
                 // this edge matches the label to insert. Update this node with token_id
                 if label.eq(edge) {
-                    debug!("Found node {:?} for label {:?}", node, &label);
+                    debug!("Found node for label {:?}", &label);
                     if node.token.is_some() {
                         bail!("During insert of token {:?} with ID {:?}: Matched node already initialized with {:?}, ID {:?}", token, token_id, node.token, node.token_id);
                     }
