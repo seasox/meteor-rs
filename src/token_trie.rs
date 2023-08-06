@@ -31,7 +31,7 @@ pub trait Trie {
 impl Default for TokenTrie {
     fn default() -> Self {
         TokenTrie {
-            root: TrieNode::new(None, None, None),
+            root: TrieNode::new(None, None),
             //lookup: Default::default(),
         }
     }
@@ -77,7 +77,7 @@ impl Trie for TokenTrie {
 
     /// Constructor for TokenTrie
     fn new(tokens: Vec<(TokenId, Token)>) -> Result<Self> {
-        let root = TrieNode::new(None, None, None);
+        let root = TrieNode::new(None, None);
         let mut trie = TokenTrie { root };
         for (token_id, token) in tokens {
             trie.root.insert(token.clone(), token.clone(), token_id)?;
@@ -114,12 +114,12 @@ pub struct TrieNode {
 }
 
 impl TrieNode {
-    fn new(token: Option<Token>, token_id: Option<TokenId>, probability: Option<Prob>) -> Self {
+    fn new(token: Option<Token>, token_id: Option<TokenId>) -> Self {
         Self {
             edges: EdgeMap::new(),
             token,
             token_id,
-            probability,
+            probability: None,
         }
     }
     fn lookup(&self, id: &TokenId) -> Option<&TrieNode> {
