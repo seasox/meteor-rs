@@ -9,9 +9,10 @@ use anyhow::Result;
 use clap::Parser;
 use env_logger;
 use llm;
+use llm::samplers::TopPTopK;
 use llm::{
-    InferenceFeedback, InferenceParameters, InferenceResponse, Model, ModelParameters, Prompt,
-    TokenId, Tokenizer, TokenizerSource,
+    InferenceFeedback, InferenceParameters, InferenceResponse, InferenceStats, Model,
+    ModelParameters, Prompt, TokenId, Tokenizer, TokenizerSource,
 };
 use log::{debug, info};
 use rand::Rng;
@@ -114,41 +115,10 @@ fn main() -> Result<()> {
 }
 
 fn mode_inference<M: Model>(model: M, context: &str) -> Result<()> {
-    let mut session = model.start_session(Default::default());
-    let mut s = String::new();
-    let res = session.infer(
-        &model,
-        &mut rand::thread_rng(),
-        &llm::InferenceRequest {
-            prompt: Prompt::Text(context),
-            parameters: &InferenceParameters::default(),
-            play_back_previous_tokens: true,
-            maximum_token_count: None,
-        },
-        // llm::OutputRequest
-        &mut Default::default(),
-        |t| -> Result<InferenceFeedback, InferenceCallbackError> {
-            match t {
-                InferenceResponse::InferredToken(t) | InferenceResponse::PromptToken(t) => {
-                    s.push_str(&t);
-                }
-                _ => {}
-            }
-            Ok(InferenceFeedback::Continue)
-        },
-    )?;
+    let (res, s) = infer(&model, context, Arc::new(TopPTopK::default()))?;
     println!("\n\nInference stats:\n{res}");
     println!("{}", s);
     Ok(())
-}
-
-fn encrypt(key: [u8; KEY_BYTES], msg: &str) -> Result<Vec<u8>, MeteorError> {
-    let key = Key::<Aes256Gcm>::from_slice(&key);
-    let cipher = Aes256Gcm::new(&key);
-    let nonce = Aes256Gcm::generate_nonce(rand::thread_rng());
-    cipher
-        .encrypt(&nonce, msg.as_ref())
-        .map_err(|_| MeteorError::EncryptionFailure)
 }
 
 fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, msg: &str) -> Result<()> {
@@ -159,32 +129,14 @@ fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, msg: &str) -> 
     let tokens = tokenizer.get_tokens();
     info!("Loaded tokenizer with {} tokens", tokens.len());
     let trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
+    assert!(trie.lookup(&model.eot_token_id()).is_some());
+    info!("EOT token is {}", &model.eot_token_id());
     let ciphertext = encrypt(key, msg)?;
 
-    let mut session = model.start_session(Default::default());
-    let mut s = String::new();
-    let res = session.infer(
+    let (res, s) = infer(
         &model,
-        &mut rand::thread_rng(),
-        &llm::InferenceRequest {
-            prompt: Prompt::Text(context),
-            parameters: &InferenceParameters {
-                sampler: Arc::new(MeteorSamplerContainer::new(trie, ciphertext)),
-            },
-            play_back_previous_tokens: true,
-            maximum_token_count: None,
-        },
-        // llm::OutputRequest
-        &mut Default::default(),
-        |t| -> Result<InferenceFeedback, InferenceCallbackError> {
-            match t {
-                InferenceResponse::InferredToken(t) | InferenceResponse::PromptToken(t) => {
-                    s.push_str(&t);
-                }
-                _ => {}
-            }
-            Ok(InferenceFeedback::Continue)
-        },
+        context,
+        Arc::new(MeteorSamplerContainer::new(trie, ciphertext)),
     )?;
     println!("\n\nInference stats:\n{res}");
     println!("{}", s);
@@ -226,6 +178,49 @@ fn load_key(filename: &str) -> Result<[u8; KEY_BYTES]> {
             Ok(random_bytes)
         }
     };
+}
+
+fn infer<M: Model>(
+    model: &M,
+    context: &str,
+    sampler: Arc<dyn llm::Sampler>,
+) -> Result<(InferenceStats, String)> {
+    let mut session = model.start_session(Default::default());
+    let mut s = String::new();
+    let res = session.infer(
+        model,
+        &mut rand::thread_rng(),
+        &llm::InferenceRequest {
+            prompt: Prompt::Text(context),
+            parameters: &InferenceParameters {
+                sampler,
+                ..Default::default()
+            },
+            play_back_previous_tokens: true,
+            maximum_token_count: None,
+        },
+        // llm::OutputRequest
+        &mut Default::default(),
+        |t| -> Result<InferenceFeedback, InferenceCallbackError> {
+            match t {
+                InferenceResponse::InferredToken(t) | InferenceResponse::PromptToken(t) => {
+                    s.push_str(&t);
+                }
+                _ => {}
+            }
+            Ok(InferenceFeedback::Continue)
+        },
+    )?;
+    Ok((res, s))
+}
+
+fn encrypt(key: [u8; KEY_BYTES], msg: &str) -> Result<Vec<u8>, MeteorError> {
+    let key = Key::<Aes256Gcm>::from_slice(&key);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Aes256Gcm::generate_nonce(rand::thread_rng());
+    cipher
+        .encrypt(&nonce, msg.as_ref())
+        .map_err(|_| MeteorError::EncryptionFailure)
 }
 
 trait GetTokens<TokenId, Token> {
