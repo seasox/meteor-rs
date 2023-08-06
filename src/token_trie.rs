@@ -39,9 +39,9 @@ impl Default for TokenTrie {
 
 #[derive(Debug, PartialEq)]
 pub struct Distribution {
-    reprs: Vec<TokenId>,
-    tokens: Vec<Vec<TokenId>>,
-    probs: Vec<Prob>,
+    pub reprs: Vec<TokenId>,
+    pub tokens: Vec<Vec<TokenId>>,
+    pub probs: Vec<Prob>,
 }
 
 impl Default for Distribution {
@@ -59,6 +59,12 @@ impl Distribution {
         self.reprs.extend(other.reprs);
         self.tokens.extend(other.tokens);
         self.probs.extend(other.probs);
+    }
+}
+
+impl Distribution {
+    pub fn weighted_index(&self) -> Result<WeightedIndex<Prob>, WeightedError> {
+        WeightedIndex::new(&self.probs)
     }
 }
 
