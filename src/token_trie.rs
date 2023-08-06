@@ -149,14 +149,14 @@ impl TrieNode {
         }
         ret
     }
-    fn probabilities(&self) -> Vec<Prob> {
+    pub fn probabilities(&self) -> Vec<Prob> {
         let mut ret: Vec<Prob> = self.probability.iter().cloned().collect();
         for edge in self.edges.values() {
             ret.extend(edge.probabilities());
         }
         ret
     }
-    fn distribution(&self) -> Distribution {
+    pub fn distribution(&self) -> Distribution {
         match self.token_id {
             None => {
                 // the current node is a split node. Bubble down
