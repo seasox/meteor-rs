@@ -281,7 +281,7 @@ impl TrieFormatFilter {
     fn filter(&self, node: &TrieNode) -> bool {
         return match self {
             //TrieFormatFilter::All => true,
-            WithProbOnly => node.probabilities().iter().any(|p| *p > 0f32),
+            TrieFormatFilter::WithProbOnly => node.probabilities().iter().any(|p| *p > 0f32),
         };
     }
 }
@@ -372,7 +372,7 @@ fn find_common_prefix<T: PartialEq + Clone>(vec1: &[T], vec2: &[T]) -> Vec<T> {
 impl Debug for TokenTrie {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         const MAX_DEPTH: Option<usize> = None;
-        const FILTER: TrieFormatFilter = WithProbOnly;
+        const FILTER: TrieFormatFilter = TrieFormatFilter::WithProbOnly;
         write!(f, "{}", self.format_debug(&vec![], 0, MAX_DEPTH, FILTER))
     }
 }
