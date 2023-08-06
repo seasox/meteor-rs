@@ -133,8 +133,17 @@ impl TrieNode {
             .map(|n| n.unwrap())
     }
 
-    fn tokens(&self) -> Vec<TokenId> {
-        let mut ret: Vec<TokenId> = self.token_id.iter().cloned().collect();
+    pub fn tokens(&self) -> Vec<TokenId> {
+        let mut ret: Vec<TokenId> = match self.probability {
+            None => vec![],
+            Some(p) => {
+                if p > 0.0 {
+                    self.token_id.iter().cloned().collect()
+                } else {
+                    vec![]
+                }
+            }
+        };
         for edge in self.edges.values() {
             ret.extend(edge.tokens());
         }
@@ -390,10 +399,11 @@ mod tests {
     #[test]
     fn test_new() -> Result<()> {
         init();
-        let args: Vec<(TokenId, Token)> = vec![(0, vec![1, 2, 3, 4]), (1, vec![1, 5, 6, 7, 8])];
-        let tokens: Vec<TokenId> = args.iter().map(|t| t.0.clone()).collect();
-        let trie = TokenTrie::new(args).with_context(|| "TokenTrie constructor failed")?;
-        assert_eq!(trie.tokens(), tokens);
+        let tokens = create_tokens(vec!["a", "abde"]);
+        let mut trie = TokenTrie::new(tokens).with_context(|| "TokenTrie constructor failed")?;
+        trie.update(vec![(0, 0.5), (1, 0.5)]);
+
+        assert_eq!(trie.tokens(), vec![0, 1]);
         println!("{:?}", trie);
         Ok(())
     }
@@ -401,10 +411,12 @@ mod tests {
     #[test]
     fn test_new_overlapping() -> Result<()> {
         init();
-        let args: Vec<(TokenId, Token)> = vec![(0, vec![1, 2, 3, 4]), (1, vec![1, 2, 3, 5])];
-        let tokens: Vec<TokenId> = args.iter().map(|t| t.0.clone()).collect();
-        let trie = TokenTrie::new(args).with_context(|| "TokenTrie constructor failed")?;
-        assert_eq!(trie.tokens(), tokens);
+        let args = create_tokens(vec!["abcd", "abce"]);
+        let mut trie =
+            TokenTrie::new(args.clone()).with_context(|| "TokenTrie constructor failed")?;
+        let probs = create_probs(&args, vec![1, 1]);
+        trie.update(probs);
+        assert_eq!(trie.tokens(), vec![0, 1]);
         println!("{:?}", trie);
         Ok(())
     }
@@ -412,10 +424,11 @@ mod tests {
     #[test]
     fn test_root_preserve() -> Result<()> {
         init();
-        let args: Vec<(TokenId, Token)> = vec![(0, vec![1])];
-        let tokens: Vec<TokenId> = args.iter().map(|t| t.0.clone()).collect();
-        let trie = TokenTrie::new(args).with_context(|| "TokenTrie constructor failed")?;
-        assert_eq!(trie.tokens(), tokens);
+        let tokens = create_tokens(vec!["a"]);
+        let mut trie = TokenTrie::new(tokens).with_context(|| "TokenTrie constructor failed")?;
+        trie.update(vec![(0, 1.0)]);
+
+        assert_eq!(trie.tokens(), vec![0]);
         Ok(())
     }
     #[test]
@@ -605,7 +618,7 @@ mod tests {
             trie.distribution(),
             Distribution {
                 reprs: vec![0, 3],
-                tokens: vec![vec![0], vec![3, 1, 2]],
+                tokens: vec![vec![], vec![]],
                 probs: vec![0 as Prob, 0 as Prob],
             }
         );
@@ -620,6 +633,33 @@ mod tests {
         assert_eq!(tokens, vec![vec![0], vec![3, 1, 2]]);
         assert_eq!(probs, vec![0.0, 22.0]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_trie_order() -> Result<()> {
+        let tokens = create_tokens(vec!["a", "b", "ab", "ba", "bab"]);
+        let probs = create_probs(&tokens, vec![1, 2, 3, 4, 5]);
+        let mut trie = TokenTrie::new(tokens)?;
+        trie.update(probs);
+
+        assert_eq!(trie.tokens(), vec![0, 2, 1, 3, 4]);
+        assert_eq!(trie.probabilities(), vec![1f32, 3f32, 2f32, 4f32, 5f32]);
+        let trie = trie.lookup(&1).expect("Token not found");
+        assert_eq!(trie.tokens(), vec![1, 3, 4]);
+        assert_eq!(trie.probabilities(), vec![2f32, 4f32, 5f32]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_trie_zero_prob_token() -> Result<()> {
+        let tokens = create_tokens(vec!["a", "b"]);
+        let probs = vec![(tokens[0].0, 1.0)];
+        let mut trie = TokenTrie::new(tokens)?;
+        trie.update(probs);
+
+        assert_eq!(trie.probabilities(), vec![1.0]);
+        assert_eq!(trie.tokens(), vec![0]);
         Ok(())
     }
 }
