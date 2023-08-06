@@ -222,7 +222,7 @@ impl TrieNode {
                         token_id,
                         edge[prefix.len()..].to_vec()
                     );
-                    let mut split_node = TrieNode::new(None, None, None);
+                    let mut split_node = TrieNode::new(None, None);
                     {
                         let edge = edge.clone();
                         split_node.edges.insert(
@@ -237,7 +237,7 @@ impl TrieNode {
                             //lookup_update(token_id, &mut split_node);
                         } else {
                             // add child node for suffix of label
-                            let token_node = TrieNode::new(Some(token), Some(token_id), None);
+                            let token_node = TrieNode::new(Some(token), Some(token_id));
                             //lookup_update(token_id, &mut token_node);
                             split_node
                                 .edges
@@ -250,7 +250,7 @@ impl TrieNode {
             }
             None => {
                 debug!("Insert new edge {:?}->{:?}", &label, &token_id);
-                let t = TrieNode::new(Some(token), Some(token_id), None);
+                let t = TrieNode::new(Some(token), Some(token_id));
                 //lookup_update(token_id, &mut t);
                 self.edges.insert(label, t);
                 Ok(())
