@@ -1,5 +1,10 @@
-use crate::token_trie::TokenTrie;
+use crate::token_trie::{Prob, TokenTrie, Trie};
+use aes_gcm::aead::rand_core::{impls, Error};
+use bitvec::field::BitField;
+use bitvec::vec::BitVec;
+use bitvec::view::BitView;
 use llm::{Sampler, TokenBias, TokenId};
+use log::{debug, info};
 use partial_sort::PartialSort;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::RngCore;
@@ -25,7 +30,7 @@ struct MeteorSampler {
     /// the token trie to sample from
     trie: TokenTrie,
     /// the byte array to embed (e.g. a ciphertext of a hidden message)
-    ciphertext: Vec<u8>,
+    ciphertext: BitVecSampler,
 }
 
 impl Default for MeteorSampler {
@@ -38,7 +43,7 @@ impl Default for MeteorSampler {
             bias_tokens: TokenBias::empty(),
             repetition_penalty_last_n: 512,
             trie: Default::default(),
-            ciphertext: vec![],
+            ciphertext: Default::default(),
         }
     }
 }
@@ -139,10 +144,75 @@ impl MeteorSampler {
             }
         }
 
-        let dist = WeightedIndex::new(&probs).expect("WeightedIndex error");
-        let idx = dist.sample(rng);
+        assert_eq!(token_ids.len(), probs.len());
+        let update_vec: Vec<(TokenId, Prob)> = token_ids
+            .iter()
+            .zip(&probs)
+            .map(|(x, y)| (*x, y.clone()))
+            .collect();
+        self.trie.update(update_vec);
+        debug!("{:?}", self.trie);
 
-        logits_id[idx].1
+        let dist = self.trie.distribution();
+        let weighted = dist.weighted_index().expect("WeightedIndex error");
+        let idx = weighted.sample(&mut self.ciphertext);
+        let tokens = &dist.tokens[idx];
+        return if tokens.len() == 1 {
+            info!("Simple distr: {}", tokens[0]);
+            tokens[0]
+        } else {
+            // resample
+            let subtrie = self.trie.lookup(&dist.reprs[idx]).expect("Lookup failed");
+            let st_tokens = subtrie.tokens();
+            let probs = subtrie.probabilities();
+            assert_eq!(st_tokens.len(), probs.len());
+            let weighted = WeightedIndex::new(probs).expect("WeightedIndex error");
+            let st_idx = weighted.sample(rng);
+            assert_eq!(&st_tokens, tokens);
+            let token = st_tokens[st_idx];
+            info!("Resampled {} from subtrie {}", token, &dist.reprs[idx]);
+            token
+        };
+    }
+}
+
+/// An RNG that uses a pre-initialized BitVector as source of randomness
+#[derive(Debug, Default)]
+struct BitVecSampler {
+    source: BitVec<u8>,
+    pub offset: usize,
+}
+
+impl BitVecSampler {
+    fn new(source: BitVec<u8>) -> Self {
+        BitVecSampler { source, offset: 0 }
+    }
+}
+
+impl RngCore for BitVecSampler {
+    fn next_u32(&mut self) -> u32 {
+        let range = self.offset..self.offset + 32;
+        // TODO pad if offset
+        let next = self
+            .source
+            .get(range)
+            .map_or_else(|| rand::thread_rng().next_u32(), |x| x.load::<u32>());
+        self.offset += 32;
+        next
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut next = self.next_u32() as u64;
+        next = next << 32 | (self.next_u32() as u64);
+        next
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        impls::fill_bytes_via_next(self, dest)
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Error> {
+        Ok(self.fill_bytes(dest))
     }
 }
 
@@ -164,7 +234,7 @@ impl MeteorSamplerContainer {
         MeteorSamplerContainer {
             inner: Mutex::new(MeteorSampler {
                 trie,
-                ciphertext,
+                ciphertext: BitVecSampler::new(ciphertext.view_bits().to_bitvec()),
                 ..Default::default()
             }),
         }
@@ -180,5 +250,23 @@ impl Sampler for MeteorSamplerContainer {
     ) -> TokenId {
         let mut sampler = self.inner.lock().unwrap();
         sampler.sample(previous_tokens, logits, rng)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::meteor_sampler::BitVecSampler;
+    use bitvec::view::BitView;
+    use rand::RngCore;
+
+    #[test]
+    fn test_meteor_sampler() -> anyhow::Result<()> {
+        let vec: Vec<u8> = vec![0, 1, 2, 3];
+        let mut sampler = BitVecSampler::new(vec.view_bits().to_bitvec());
+        let next = sampler.next_u32();
+        let expect =
+            (vec[3] as u32) << 24 | (vec[2] as u32) << 16 | (vec[1] as u32) << 8 | (vec[0] as u32);
+        assert_eq!(next, expect);
+        Ok(())
     }
 }
