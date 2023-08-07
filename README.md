@@ -1,6 +1,6 @@
 # Meteor-RS
 
-Meteor is a cryptographically secure steganography for realistic distributions. It utilizes the randomness used for sampling 
+[Meteor](https://meteorfrom.space) is a cryptographically secure steganography for realistic distributions. It utilizes the randomness used for sampling 
 from generative models to embed a hidden message. This project implements Meteor in Rust while fixing tokenization issues with
 the authors' original approach.
 
