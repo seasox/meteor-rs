@@ -48,6 +48,10 @@ impl Default for MeteorSampler {
     }
 }
 
+fn common_bit_prefix(x: f32, y: f32) -> BitVec {
+    todo!()
+}
+
 impl MeteorSampler {
     fn sample(
         &mut self,
