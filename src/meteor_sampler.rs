@@ -1,4 +1,4 @@
-use crate::token_trie::{Prob, TokenTrie, Trie};
+use crate::token_trie::{TokenTrie, Trie};
 use aes_gcm::aead::rand_core::{impls, Error};
 use bitvec::field::BitField;
 use bitvec::vec::BitVec;
@@ -52,13 +52,17 @@ fn common_bit_prefix(x: f32, y: f32) -> BitVec {
     todo!()
 }
 
+struct PreprocessedLogits {
+    token_ids: Vec<TokenId>,
+    probs: Vec<f32>,
+}
+
 impl MeteorSampler {
-    fn sample(
-        &mut self,
+    fn preprocess_logits<'a>(
+        &self,
+        logits: &'a [f32],
         previous_tokens: &[TokenId],
-        logits: &[f32],
-        rng: &mut dyn RngCore,
-    ) -> TokenId {
+    ) -> PreprocessedLogits {
         let Self {
             top_k,
             top_p,
@@ -147,14 +151,24 @@ impl MeteorSampler {
                 *p *= cumsum;
             }
         }
+        PreprocessedLogits { token_ids, probs }
+    }
 
+    fn sample(
+        &mut self,
+        previous_tokens: &[TokenId],
+        logits: &[f32],
+        rng: &mut dyn RngCore,
+    ) -> TokenId {
+        let PreprocessedLogits { token_ids, probs } =
+            self.preprocess_logits(logits, previous_tokens);
         assert_eq!(token_ids.len(), probs.len());
-        let update_vec: Vec<(TokenId, Prob)> = token_ids
+        let update_vec: Vec<(TokenId, u64)> = token_ids
             .iter()
             .zip(&probs)
-            .map(|(x, y)| (*x, y.clone()))
+            .map(|(x, y)| (*x, *y as u64)) // todo rescale
             .collect();
-        self.trie.update(update_vec);
+        self.trie.update(&update_vec);
         debug!("{:?}", self.trie);
 
         let dist = self.trie.distribution();
