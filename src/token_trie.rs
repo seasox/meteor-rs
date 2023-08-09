@@ -474,6 +474,7 @@ mod tests {
     }
     #[test]
     fn test_resample() -> Result<()> {
+        init();
         let args = create_tokens(vec!["Alice", "an", "ant"]);
         let probs = create_probs(&args, vec![1u8, 2, 5]);
         let mut trie = TokenTrie::new(args)?;
@@ -497,6 +498,7 @@ mod tests {
 
     #[test]
     fn test_resample_deep() -> Result<()> {
+        init();
         let args = create_tokens(vec!["a", "alice", "an", "ant", "bob"]);
         let probs = create_probs(&args, vec![1u8, 3, 3, 4, 5]);
         let mut trie = TokenTrie::new(args)?;
@@ -516,6 +518,7 @@ mod tests {
 
     #[test]
     fn test_resample_multi_split() -> Result<()> {
+        init();
         let args = create_tokens(vec!["alice", "an", "albert", "ant", "bob", "a"]);
         let probs = create_probs(&args, vec![3u8, 3, 4, 5, 7, 1]);
         let mut trie = TokenTrie::new(args)?;
@@ -555,6 +558,7 @@ mod tests {
 
     #[test]
     fn test_resample_multi_split_pseudo() -> Result<()> {
+        init();
         let tokens = create_tokens(vec!["alice", "an", "albert", "ant", "bob"]);
         let probs = create_probs(&tokens, vec![3u8, 3, 4, 5, 7]);
         let mut trie = TokenTrie::new(tokens)?;
@@ -596,6 +600,7 @@ mod tests {
 
     #[test]
     fn test_empty_label_split() -> Result<()> {
+        init();
         let tokens = create_tokens(vec!["ABC", "AB"]);
         let probs = create_probs(&tokens, vec![2u8, 3]);
         let mut trie = TokenTrie::new(tokens)?;
@@ -611,6 +616,7 @@ mod tests {
 
     #[test]
     fn test_from_labels() -> Result<()> {
+        init();
         let tokens = create_tokens(vec!["Alice", "an", "ant", "a"]);
         let probs = create_probs(&tokens, vec![1u8, 4, 7, 22]);
         let mut trie = TokenTrie::new(tokens)?;
@@ -638,6 +644,7 @@ mod tests {
 
     #[test]
     fn test_update_reset() -> Result<()> {
+        init();
         let tokens = create_tokens(vec!["Alice", "an", "ant", "a"]);
         let mut trie = TokenTrie::new(tokens.clone())?;
         let probs = create_probs(&tokens, vec![1u8, 4, 7, 22]);
@@ -682,6 +689,7 @@ mod tests {
 
     #[test]
     fn test_trie_order() -> Result<()> {
+        init();
         let tokens = create_tokens(vec!["a", "b", "ab", "ba", "bab"]);
         let probs = create_probs(&tokens, vec![1u8, 2, 3, 4, 5]);
         let mut trie = TokenTrie::new(tokens)?;
@@ -697,6 +705,7 @@ mod tests {
 
     #[test]
     fn test_trie_none_prob_token() -> Result<()> {
+        init();
         let tokens = create_tokens(vec!["a", "b"]);
         let probs = create_probs(&tokens, vec![1u8]);
         let mut trie = TokenTrie::new(tokens)?;
@@ -711,6 +720,7 @@ mod tests {
 
     #[test]
     fn test_trie_zero_prob_token() -> Result<()> {
+        init();
         let tokens = create_tokens(vec!["a", "b"]);
         let probs = create_probs(&tokens, vec![1u8, 0]);
         let mut trie = TokenTrie::new(tokens)?;
