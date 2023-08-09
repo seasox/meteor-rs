@@ -209,28 +209,26 @@ impl BitVecSampler {
 
 impl RngCore for BitVecSampler {
     fn next_u32(&mut self) -> u32 {
-        let range = self.offset..self.offset + 32;
+        panic!("use next_u64");
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let range = self.offset..self.offset + 64;
         // TODO pad if offset
         let next = self
             .source
             .get(range)
-            .map_or_else(|| rand::thread_rng().next_u32(), |x| x.load::<u32>());
-        self.offset += 32;
+            .map_or_else(|| rand::thread_rng().next_u64(), |x| x.load::<u64>());
+        self.offset += 64;
         next
     }
 
-    fn next_u64(&mut self) -> u64 {
-        let mut next = self.next_u32() as u64;
-        next = next << 32 | (self.next_u32() as u64);
-        next
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("use next_u64");
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        impls::fill_bytes_via_next(self, dest)
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Error> {
-        Ok(self.fill_bytes(dest))
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), Error> {
+        panic!("use next_u64");
     }
 }
 
