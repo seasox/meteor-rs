@@ -110,7 +110,7 @@ fn main() -> Result<()> {
             context,
             key_file,
             stego_text,
-        } => mode_decode(llama, &context, &key_file, &stego_text),
+        } => mode_decode(&llama, &context, &key_file, &stego_text).map(|_| ()),
     };
 }
 
@@ -143,7 +143,23 @@ fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) ->
     Ok(s)
 }
 
-fn mode_decode<M: Model>(model: M, _context: &str, key_file: &str, stego_text: &str) -> Result<()> {
+fn mode_decode<M: Model>(
+    model: &M,
+    context: &str,
+    key_file: &str,
+    stego_text: &str,
+) -> Result<String> {
+    let mut stego_text = String::from(stego_text);
+    if stego_text.eq("-") {
+        stego_text.clear();
+        // load stego text from stdin
+        std::io::stdin().read_to_string(&mut stego_text)?;
+    }
+    info!("Loaded stego text \"{}\"", &stego_text);
+
+    assert_eq!(&stego_text[..context.len()], context);
+    stego_text.drain(..context.len());
+
     info!("Loading key file {}...", key_file);
     let _key = load_key(key_file)?;
     info!("Loading tokenizer...");
@@ -151,7 +167,7 @@ fn mode_decode<M: Model>(model: M, _context: &str, key_file: &str, stego_text: &
     let tokens = tokenizer.get_tokens();
     info!("Loaded tokenizer with {} tokens", tokens.len());
     let _trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
-    let tokenization = tokenizer.tokenize(stego_text, false)?;
+    let tokenization = tokenizer.tokenize(&stego_text, false)?;
     info!("Tokenization: {:?}", tokenization);
     todo!("Decode")
 }
@@ -237,3 +253,74 @@ impl GetTokens<TokenId, Vec<u8>> for Tokenizer {
         return BTreeMap::from_iter(map);
     }
 }
+
+/*
+struct MockModel {}
+
+impl Model for MockModel {
+    fn start_session(&self, config: InferenceSessionConfig) -> InferenceSession {
+        todo!()
+    }
+
+    fn evaluate(
+        &self,
+        session: &mut InferenceSession,
+        input_tokens: &[TokenId],
+        output_request: &mut OutputRequest,
+    ) {
+        todo!()
+    }
+
+    fn tokenizer(&self) -> &Tokenizer {
+        todo!()
+    }
+
+    fn context_size(&self) -> usize {
+        todo!()
+    }
+
+    fn bot_token_id(&self) -> Option<TokenId> {
+        todo!()
+    }
+
+    fn eot_token_id(&self) -> TokenId {
+        todo!()
+    }
+
+    fn supports_rewind(&self) -> bool {
+        todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{mode_decode, mode_encode};
+    use llm::{ModelParameters, TokenizerSource};
+    use std::path::Path;
+
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+    #[test]
+    fn test_open_llama_encode_decode() -> anyhow::Result<()> {
+        init();
+        let model_path = Path::new("models/open_llama_7b-q4_0-ggjt.bin");
+        let llama = llm::load::<llm::models::Llama>(
+            model_path,
+            TokenizerSource::Embedded,
+            ModelParameters {
+                use_gpu: true,
+                ..Default::default()
+            },
+            llm::load_progress_callback_stdout,
+        )?;
+        let key = "key.bin";
+        let context = "Unit Tests are important for software quality because";
+        let msg = "hello world";
+        let stegotext = mode_encode(&llama, context, key, msg)?;
+        let recovered = mode_decode(&llama, context, key, &stegotext)?;
+        assert_eq!(recovered, msg);
+        Ok(())
+    }
+}
+*/
