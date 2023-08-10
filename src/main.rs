@@ -1,8 +1,12 @@
-mod meteor_sampler;
-mod token_trie;
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
+use std::fmt::{Display, Formatter};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::Path;
+use std::sync::Arc;
 
-use crate::meteor_sampler::MeteorSamplerContainer;
-use crate::token_trie::{TokenTrie, Trie};
 use aes_gcm::aead::Aead;
 use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit};
 use anyhow::Result;
@@ -16,14 +20,13 @@ use llm::{
 };
 use log::{debug, info};
 use rand::Rng;
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
-use std::fmt::{Display, Formatter};
-use std::fs::File;
-use std::io::{Read, Write};
-use std::path::Path;
-use std::sync::Arc;
+
+use crate::meteor_sampler::SamplerContainer;
+use crate::token_trie::{TokenTrie, Trie};
+
+mod meteor_sampler;
+mod token_trie;
+mod util;
 
 #[derive(Debug, Parser)]
 #[clap(version = "1.0", author = "Jeremy Boy <github@jboy.eu>")]
@@ -123,7 +126,7 @@ fn mode_inference<M: Model>(model: M, context: &str) -> Result<()> {
 
 fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) -> Result<String> {
     info!("Loading key file {}...", key_file);
-    let key = load_key(key_file)?;
+    let _key = load_key(key_file)?;
     info!("Loading tokenizer...");
     let tokenizer = model.tokenizer();
     let tokens = tokenizer.get_tokens();
