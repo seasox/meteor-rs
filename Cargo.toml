@@ -16,6 +16,9 @@ log = { version = "0.4.19", features = ["max_level_debug", "release_max_level_wa
 partial_sort = "0.2.0"
 rand = "0.8.5"
 
+[profile.dev.package.ggml-sys]
+opt-level = 3
+
 [target.'cfg(all(target_os = "mac", target_arch = "arm"))'.dependencies.llm]
 path = "lib/llm/crates/llm"
 features = [ "metal" ]
