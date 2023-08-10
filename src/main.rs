@@ -105,7 +105,7 @@ fn main() -> Result<()> {
             context,
             key_file,
             msg,
-        } => mode_encode(llama, &context, &key_file, &msg),
+        } => mode_encode(&llama, &context, &key_file, &msg).map(|_| ()),
         ProgramMode::Decode {
             context,
             key_file,
@@ -121,7 +121,7 @@ fn mode_inference<M: Model>(model: M, context: &str) -> Result<()> {
     Ok(())
 }
 
-fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, msg: &str) -> Result<()> {
+fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) -> Result<String> {
     info!("Loading key file {}...", key_file);
     let key = load_key(key_file)?;
     info!("Loading tokenizer...");
@@ -130,17 +130,17 @@ fn mode_encode<M: Model>(model: M, context: &str, key_file: &str, msg: &str) -> 
     info!("Loaded tokenizer with {} tokens", tokens.len());
     let trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
     assert!(trie.lookup(&model.eot_token_id()).is_some());
-    info!("EOT token is {}", &model.eot_token_id());
-    let ciphertext = encrypt(key, msg)?;
+    // TODO encrypt
+    //let ciphertext = encrypt(key, msg)?;
 
     let (res, s) = infer(
-        &model,
+        model,
         context,
-        Arc::new(MeteorSamplerContainer::new(trie, ciphertext)),
+        Arc::new(SamplerContainer::new(trie, msg.as_bytes())),
     )?;
-    println!("\n\nInference stats:\n{res}");
+    info!("Inference stats: {}", res);
     println!("{}", s);
-    Ok(())
+    Ok(s)
 }
 
 fn mode_decode<M: Model>(model: M, _context: &str, key_file: &str, stego_text: &str) -> Result<()> {
