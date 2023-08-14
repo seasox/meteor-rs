@@ -1,9 +1,7 @@
-use log::debug;
-
-use anyhow::{bail, Result};
-use rand::distributions::{WeightedError, WeightedIndex};
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
+
+use anyhow::{bail, Result};
 
 type TokenId = u32;
 type Token = Vec<u8>;
@@ -53,6 +51,28 @@ pub struct Distribution {
     pub probs: Vec<Prob>,
 }
 
+impl Distribution {
+    pub(crate) fn find_token_prefix_index(
+        &self,
+        get_token: impl Fn(usize) -> Vec<u8>,
+        token: &[u8],
+        special_token_ids: &[TokenId],
+    ) -> Option<usize> {
+        for (idx, t) in self
+            .reprs
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| !special_token_ids.contains(id))
+        {
+            let t = get_token(*t as usize);
+            if token.starts_with(&t) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+}
+
 impl Default for Distribution {
     fn default() -> Self {
         Distribution {
@@ -68,12 +88,6 @@ impl Distribution {
         self.reprs.extend(other.reprs);
         self.tokens.extend(other.tokens);
         self.probs.extend(other.probs);
-    }
-}
-
-impl Distribution {
-    pub fn weighted_index(&self) -> Result<WeightedIndex<Prob>, WeightedError> {
-        WeightedIndex::new(&self.probs)
     }
 }
 
@@ -204,7 +218,7 @@ impl TrieNode {
             Some((edge, node)) => {
                 // this edge matches the label to insert. Update this node with token_id
                 if label.eq(edge) {
-                    debug!("Found node for label {:?}", &label);
+                    //debug!("Found node for label {:?}", &label);
                     if node.token.is_some() {
                         bail!("During insert of token {:?} with ID {:?}: Matched node already initialized with {:?}, ID {:?}", token, token_id, node.token, node.token_id);
                     }
@@ -216,7 +230,7 @@ impl TrieNode {
                 let prefix = find_common_prefix(edge, &label);
                 assert!(!prefix.is_empty());
                 if edge.eq(&prefix) {
-                    debug!("Bubble down");
+                    //debug!("Bubble down");
                     node.insert(
                         label[prefix.len()..].to_vec(),
                         token,
@@ -226,12 +240,12 @@ impl TrieNode {
                     Ok(())
                 } else {
                     // label != edge && edge != prefix => label or edge (or both) have a distinct suffix: insert split
-                    debug!(
+                    /*debug!(
                         "Insert split node for {:?} -> {} and {:?}",
                         label[prefix.len()..].to_vec(),
                         token_id,
                         edge[prefix.len()..].to_vec()
-                    );
+                    );*/
                     let mut split_node = TrieNode::new(None, None);
                     {
                         let edge = edge.clone();
@@ -259,7 +273,7 @@ impl TrieNode {
                 }
             }
             None => {
-                debug!("Insert new edge {:?}->{:?}", &label, &token_id);
+                //debug!("Insert new edge {:?}->{:?}", &label, &token_id);
                 let t = TrieNode::new(Some(token), Some(token_id));
                 //lookup_update(token_id, &mut t);
                 self.edges.insert(label, t);
@@ -389,8 +403,10 @@ impl Debug for TokenTrie {
 
 #[cfg(test)]
 mod tests {
-    use crate::token_trie::{Distribution, Prob, Token, TokenId, TokenTrie, Trie};
     use anyhow::{Context, Result};
+    use log::{debug, info};
+
+    use crate::token_trie::{Distribution, Prob, Token, TokenId, TokenTrie, Trie};
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -405,7 +421,7 @@ mod tests {
     }
 
     fn create_probs<P: Copy + Into<Prob>>(
-        tokens: &Vec<(TokenId, Token)>,
+        tokens: &[(TokenId, Token)],
         probs: Vec<P>,
     ) -> Vec<(TokenId, Prob)> {
         assert!(tokens.len() >= probs.len()); // test impl error, not test failure!
@@ -730,6 +746,104 @@ mod tests {
 
         assert_eq!(trie.probabilities(), vec![1]);
         assert_eq!(trie.tokens(), vec![0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_distribution() -> Result<()> {
+        init();
+        let tokens: Vec<(TokenId, Token)> =
+            create_tokens(vec!["Alice", "found", "an", "ant", "at", "the", "tree"]);
+        let probs = create_probs(&tokens, [1u8; 7].to_vec());
+        let mut trie = TokenTrie::new(tokens.clone())?;
+        trie.update(&probs);
+
+        debug!("{:?}", trie);
+
+        let dist = trie.distribution();
+
+        info!("{:?}", dist);
+        assert_eq!(dist.reprs, vec![0, 2, 4, 1, 5, 6]);
+        assert_eq!(dist.probs, vec![1, 2, 1, 1, 1, 1]);
+        assert_eq!(
+            dist.tokens,
+            vec![vec![0], vec![2, 3], vec![4], vec![1], vec![5], vec![6]]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_distribution_lookup() -> Result<()> {
+        init();
+        let tokens: Vec<(TokenId, Token)> =
+            create_tokens(vec!["Alice", "found", "an", "ant", "at", "the", "tree"]);
+        fn get_token(tokens: &[(TokenId, Token)]) -> impl Fn(usize) -> Vec<u8> + '_ {
+            |idx| tokens[idx].1.clone()
+        }
+        let get_token = get_token(&tokens);
+        let probs = create_probs(&tokens, [1u8; 7].to_vec());
+        let mut trie = TokenTrie::new(tokens.clone())?;
+        trie.update(&probs);
+
+        debug!("{:?}", trie);
+
+        let dist = trie.distribution();
+
+        debug!("{:?}", dist);
+
+        assert_eq!(
+            dist.find_token_prefix_index(&get_token, "ant".as_bytes(), &vec![])
+                .map(|x| dist.reprs[x]),
+            Some(2)
+        );
+        assert_eq!(
+            dist.find_token_prefix_index(&get_token, "tree".as_bytes(), &vec![])
+                .map(|x| dist.reprs[x]),
+            Some(6)
+        );
+        assert_eq!(
+            dist.find_token_prefix_index(&get_token, "Bob".as_bytes(), &vec![])
+                .map(|x| dist.reprs[x]),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_distribution_special_tokens() -> Result<()> {
+        init();
+        let tokens: Vec<(TokenId, Token)> = create_tokens(vec![
+            "Alice",
+            "found",
+            "an",
+            "ant",
+            "ant__SPECIAL", /* <-- special token */
+            "at",
+            "the",
+            "tree",
+            "__SPECIAL", /* <-- special token */
+        ]);
+        fn get_token(tokens: &[(TokenId, Token)]) -> impl Fn(usize) -> Vec<u8> + '_ {
+            |idx| tokens[idx].1.clone()
+        }
+        let get_token = get_token(&tokens);
+        let probs = create_probs(&tokens, [1u8; 7].to_vec());
+        let mut trie = TokenTrie::new(tokens.clone())?;
+        trie.update(&probs);
+
+        debug!("{:?}", trie);
+
+        let dist = trie.distribution();
+        let special_tokens = vec![7];
+
+        debug!("{:?}", dist);
+
+        assert_eq!(
+            dist.find_token_prefix_index(&get_token, "__SPECIAL".as_bytes(), &special_tokens)
+                .map(|x| dist.reprs[x]),
+            None
+        );
         Ok(())
     }
 }

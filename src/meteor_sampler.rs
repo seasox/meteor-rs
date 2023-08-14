@@ -1,20 +1,68 @@
-use crate::token_trie::{TokenTrie, Trie};
-use crate::util::{cumsum_rescale, prefix_bit_length, Rescale};
+use std::cmp::min;
+use std::fmt::{Debug, Formatter};
+use std::sync::Mutex;
+
 use aes_gcm::aead::rand_core::Error;
+use anyhow::Context;
 use bitvec::field::BitField;
+use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use bitvec::view::BitView;
-use llm::{Sampler, TokenBias, TokenId};
+use llm::{Sampler, TokenBias, TokenId, Tokenizer};
 use log::{debug, info};
 use partial_sort::PartialSort;
 use rand::distributions::{Distribution, WeightedIndex};
-use rand::RngCore;
-use std::fmt::Debug;
-use std::sync::Mutex;
+use rand::prelude::StdRng;
+use rand::{Rng, RngCore};
+
+use crate::token_trie::{TokenTrie, Trie};
+use crate::util::{cumsum_rescale, prefix_bits, Cumsum, Rescale};
+
+pub(crate) struct MeteorDecodeSampler {
+    sampler_config: TopKTopPConfig,
+    /// the token trie to sample from
+    trie: TokenTrie,
+    /// the byte array to embed (e.g. a ciphertext of a hidden message)
+    context: Vec<TokenId>,
+    /// the stego text to decode
+    stego_text: Vec<u8>,
+    /// a tokenizer
+    tokenizer: Tokenizer,
+    pub recovered_bits: BitVec<u8>,
+    special_token_ids: Vec<TokenId>,
+}
+
+impl Debug for MeteorDecodeSampler {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MeteorDecodeSampler")
+    }
+}
+
+impl MeteorDecodeSampler {
+    pub fn new(
+        trie: TokenTrie,
+        tokenizer: &Tokenizer,
+        context: Vec<TokenId>,
+        stego_text: Vec<u8>,
+        special_token_ids: Vec<TokenId>,
+    ) -> MeteorDecodeSampler {
+        MeteorDecodeSampler {
+            sampler_config: TopKTopPConfig::default(),
+            trie,
+            context,
+            stego_text,
+            tokenizer: match tokenizer {
+                Tokenizer::Embedded(t) => Tokenizer::Embedded(t.clone()),
+                Tokenizer::HuggingFace(t) => Tokenizer::HuggingFace(t.clone()),
+            },
+            recovered_bits: BitVec::new(),
+            special_token_ids,
+        }
+    }
+}
 
 #[derive(Debug)]
-/// A sampler based on TopKTopP. Instead of an rng, this will use hidden message ciphertexts to select a msg
-pub(crate) struct MeteorEncodeSampler {
+struct TopKTopPConfig {
     /// The top K words by score are kept during sampling.
     pub top_k: usize,
     /// The cumulative probability after which no more words are kept for sampling.
@@ -29,30 +77,44 @@ pub(crate) struct MeteorEncodeSampler {
     pub bias_tokens: TokenBias,
     /// The number of tokens to consider for the repetition penalty.
     pub repetition_penalty_last_n: usize,
-    /// the token trie to sample from
-    trie: TokenTrie,
-    /// the byte array to embed (e.g. a ciphertext of a hidden message)
-    ciphertext: BitVecSampler,
 }
 
-impl Default for MeteorEncodeSampler {
+impl Default for TopKTopPConfig {
     fn default() -> Self {
-        Self {
+        TopKTopPConfig {
             top_k: 40,
             top_p: 0.95,
             repeat_penalty: 1.30,
             temperature: 0.80,
             bias_tokens: TokenBias::empty(),
             repetition_penalty_last_n: 512,
-            trie: Default::default(),
-            ciphertext: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug)]
+/// A sampler based on TopKTopP. Instead of an rng, this will use hidden message ciphertexts to select a msg
+pub(crate) struct MeteorEncodeSampler {
+    sampler_config: TopKTopPConfig,
+    /// the token trie to sample from
+    trie: TokenTrie,
+    /// the byte array to embed (e.g. a ciphertext of a hidden message)
+    ciphertext: BitVecSampler,
+}
+
+impl MeteorEncodeSampler {
+    pub fn new(trie: TokenTrie, msg: Vec<u8>, key_rng: StdRng, pad_rng: StdRng) -> Self {
+        MeteorEncodeSampler {
+            sampler_config: TopKTopPConfig::default(),
+            trie,
+            ciphertext: BitVecSampler::new(msg, key_rng, pad_rng),
         }
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct SamplerContainer<T> {
-    inner: Mutex<T>,
+    pub(crate) inner: Mutex<T>,
 }
 
 impl<T: Default> Default for SamplerContainer<T> {
@@ -63,14 +125,10 @@ impl<T: Default> Default for SamplerContainer<T> {
     }
 }
 
-impl SamplerContainer<MeteorEncodeSampler> {
-    pub fn new(trie: TokenTrie, ciphertext: &[u8]) -> Self {
+impl<S> SamplerContainer<S> {
+    pub fn new(sampler: S) -> Self {
         SamplerContainer {
-            inner: Mutex::new(MeteorEncodeSampler {
-                trie,
-                ciphertext: BitVecSampler::new(ciphertext.view_bits().to_bitvec()),
-                ..Default::default()
-            }),
+            inner: Mutex::new(sampler),
         }
     }
 }
@@ -205,15 +263,15 @@ impl MutableSampler for MeteorEncodeSampler {
             info!("Ciphertext embedded, returning EOT token");
             return 2; // EOT token
         }
-        let Self {
+        let TopKTopPConfig {
             top_k,
             top_p,
             repeat_penalty,
             temperature,
             repetition_penalty_last_n,
             ..
-        } = *self;
-        let bias_tokens = &self.bias_tokens;
+        } = self.sampler_config;
+        let bias_tokens = &self.sampler_config.bias_tokens;
 
         let PreprocessedLogits { token_ids, probs } = preprocess_logits(
             top_k,
@@ -235,22 +293,34 @@ impl MutableSampler for MeteorEncodeSampler {
             .map(|(x, y)| (*x, *y))
             .collect();
         self.trie.update(&update_vec);
-        debug!("{:?}", self.trie);
+        //debug!("{:?}", self.trie);
 
         let dist = self.trie.distribution();
-        let weighted = dist.weighted_index().expect("WeightedIndex error");
-        let idx = weighted.sample(&mut self.ciphertext);
+        //let weighted = dist.weighted_index().expect("WeightedIndex error");
+        //let idx = weighted.sample(&mut self.ciphertext);
+        let cumsum = dist.probs.cumsum(0);
+        let coins: u64 = self.ciphertext.gen();
+        let idx = cumsum
+            .iter()
+            .enumerate()
+            .find(|(_, &e)| e > coins)
+            .map(|(idx, _)| idx)
+            .expect("Sampling failed");
         let tokens = &dist.tokens[idx];
 
-        let Rescale { probs: _, cumsum } =
-            cumsum_rescale(dist.probs.iter().map(|x| *x as f32).collect());
-        let num_bits_encoded =
-            prefix_bit_length(if idx > 0 { cumsum[idx - 1] } else { 0 }, cumsum[idx]);
-        self.ciphertext.offset -= 64 - num_bits_encoded as usize;
+        let lower = if idx > 0 { cumsum[idx - 1] } else { 0 };
+        let upper = cumsum[idx];
+        let bits_encoded = prefix_bits(lower, upper);
+        let num_bits_encoded = bits_encoded.len();
+        if num_bits_encoded > 0 {
+            info!("Encoded bits {}", bits_encoded);
+        }
+        self.ciphertext.offset -= 64 - num_bits_encoded;
         info!(
-            "{} bits encoded, {} bits remaining",
+            "{} bits encoded, {} bits remaining, offset {}",
             num_bits_encoded,
-            bits_remaining as i32 - num_bits_encoded as i32
+            bits_remaining as i32 - num_bits_encoded as i32,
+            self.ciphertext.offset,
         );
 
         return if tokens.len() == 1 {
@@ -272,36 +342,160 @@ impl MutableSampler for MeteorEncodeSampler {
     }
 }
 
+impl MutableSampler for MeteorDecodeSampler {
+    fn sample(
+        &mut self,
+        previous_tokens: &[TokenId],
+        logits: &[f32],
+        rng: &mut dyn RngCore,
+    ) -> TokenId {
+        if self.context.eq(previous_tokens) {
+            info!("starting new stego decoder session");
+            self.recovered_bits.clear();
+        }
+        if self.stego_text.is_empty() {
+            info!("Decoding complete: EOT");
+            return 2;
+        }
+        let TopKTopPConfig {
+            top_k,
+            top_p,
+            repeat_penalty,
+            temperature,
+            repetition_penalty_last_n,
+            ..
+        } = self.sampler_config;
+        let bias_tokens = &self.sampler_config.bias_tokens;
+
+        let PreprocessedLogits { token_ids, probs } = preprocess_logits(
+            top_k,
+            top_p,
+            repeat_penalty,
+            temperature,
+            repetition_penalty_last_n,
+            bias_tokens,
+            logits,
+            previous_tokens,
+        );
+        assert_eq!(token_ids.len(), probs.len());
+
+        let Rescale { probs, cumsum: _ } = cumsum_rescale(probs);
+
+        let update_vec: Vec<(TokenId, u64)> = token_ids
+            .iter()
+            .zip(&probs)
+            .map(|(x, y)| (*x, *y))
+            .collect();
+        self.trie.update(&update_vec);
+
+        //debug!("{:?}", self.trie);
+
+        let dist = self.trie.distribution();
+        let get_token = |idx| self.tokenizer.token(idx);
+        let idx = dist
+            .find_token_prefix_index(get_token, &self.stego_text, &self.special_token_ids)
+            .with_context(|| {
+                format!(
+                    "Token ID lookup failed for {:?} in distribution {:?} with reprs {:?}",
+                    self.stego_text[0],
+                    dist,
+                    dist.reprs
+                        .iter()
+                        .map(|r| get_token(*r as usize))
+                        .collect::<Vec<Vec<u8>>>(),
+                )
+            })
+            .unwrap();
+        let cumsum = dist.probs.cumsum(0);
+        let lower = if idx > 0 { cumsum[idx - 1] } else { 0 };
+        let upper = cumsum[idx];
+        let bits_encoded = prefix_bits(lower, upper);
+        if !bits_encoded.is_empty() {
+            info!("Recovered bits {}", bits_encoded)
+        }
+        self.recovered_bits.extend(&bits_encoded);
+        let tokens = &dist.tokens[idx];
+
+        let token = if tokens.len() == 1 {
+            debug!("Simple distr: {}", tokens[0]);
+            tokens[0]
+        } else {
+            // resample
+            let subtrie = self.trie.lookup(&dist.reprs[idx]).expect("Lookup failed");
+            let st_tokens = subtrie.tokens();
+            let probs = subtrie.probabilities();
+            assert_eq!(st_tokens.len(), probs.len());
+            let weighted = WeightedIndex::new(probs).expect("WeightedIndex error");
+            let st_idx = weighted.sample(rng);
+            assert_eq!(&st_tokens, tokens);
+            let token = st_tokens[st_idx];
+            debug!("Resampled {} from subtrie {}", token, &dist.reprs[idx]);
+            token
+        };
+        let token_bytes = self.tokenizer.decode(vec![token], false);
+        self.stego_text
+            .drain(..min(self.stego_text.len(), token_bytes.len()));
+
+        info!(
+            "{} bits decoded ({} bits total, {} bytes of stego text remaining)",
+            &bits_encoded.len(),
+            self.recovered_bits.len(),
+            self.stego_text.len()
+        );
+        token
+    }
+}
+
 //region BitVecSampler
 /// An RNG that uses a pre-initialized BitVector as source of randomness
 #[derive(Debug, Default)]
-struct BitVecSampler {
-    source: BitVec<u8>,
+struct BitVecSampler<R1: Rng = StdRng, R2: Rng = StdRng> {
+    source: BitVec<u8, Msb0>,
+    key_rng: R1,
+    pad_rng: R2,
     pub offset: usize,
 }
 
-impl BitVecSampler {
-    fn new(source: BitVec<u8>) -> Self {
-        BitVecSampler { source, offset: 0 }
+impl<R1: Rng, R2: Rng> BitVecSampler<R1, R2> {
+    fn new(source: Vec<u8>, key_rng: R1, pad_rng: R2) -> Self {
+        BitVecSampler {
+            source: BitVec::<u8, Msb0>::from_vec(source.into_iter().collect::<Vec<u8>>()),
+            key_rng,
+            pad_rng,
+            offset: 0,
+        }
     }
 
     fn bits_remaining(&self) -> usize {
-        self.source.len() - self.offset
+        self.source.len() - min(self.offset, self.source.len())
     }
 }
 
-impl RngCore for BitVecSampler {
+impl<R1: Rng, R2: Rng> RngCore for BitVecSampler<R1, R2> {
     fn next_u32(&mut self) -> u32 {
         panic!("use next_u64");
     }
 
     fn next_u64(&mut self) -> u64 {
-        let range = self.offset..self.offset + 64;
-        // TODO pad if offset
-        let next = self
-            .source
-            .get(range)
-            .map_or_else(|| rand::thread_rng().next_u64(), |x| x.load::<u64>());
+        let source_len = self.source[self.offset..].len();
+        let source = if source_len < 64 {
+            let mut source = self.source[self.offset..].to_bitvec();
+            let pad: BitVec<u8> = unsafe {
+                self.pad_rng.next_u64().view_bits().align_to::<u8>().1[..64 - source_len]
+                    .to_bitvec()
+            };
+            //debug!("pad source \n{} with \n{}", source, pad);
+            source.extend(pad);
+            //debug!("padded source: \n{}", source);
+            source
+        } else {
+            self.source[self.offset..self.offset + 64].to_bitvec()
+        };
+        let next: u64 = source.load_be();
+        let key: u64 = self.key_rng.gen();
+        // TODO encrypt
+        // let next = next ^ key;
+        //debug!("sampled {:02X}", next);
         self.offset += 64;
         next
     }
@@ -318,9 +512,10 @@ impl RngCore for BitVecSampler {
 
 #[cfg(test)]
 mod tests {
+    use rand::rngs::StdRng;
+    use rand::{RngCore, SeedableRng};
+
     use crate::meteor_sampler::BitVecSampler;
-    use aes_gcm::aead::rand_core::RngCore;
-    use bitvec::view::BitView;
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -330,16 +525,18 @@ mod tests {
     fn test_bitvec_sampler() -> anyhow::Result<()> {
         init();
         let vec: Vec<u8> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
-        let mut sampler = BitVecSampler::new(vec.view_bits().to_bitvec());
+        let key_rng = StdRng::seed_from_u64(0x00C0FFEE);
+        let pad_rng = StdRng::seed_from_u64(0xDEADBEEF);
+        let mut sampler = BitVecSampler::new(vec.clone(), key_rng, pad_rng);
         let next = sampler.next_u64();
-        let expect = (vec[7] as u64) << 8 * 7
-            | (vec[6] as u64) << 8 * 6
-            | (vec[5] as u64) << 8 * 5
-            | (vec[4] as u64) << 8 * 4
-            | (vec[3] as u64) << 8 * 3
-            | (vec[2] as u64) << 8 * 2
-            | (vec[1] as u64) << 8 * 1
-            | (vec[0] as u64);
+        let expect = (vec[0] as u64) << 8 * 7
+            | (vec[1] as u64) << 8 * 6
+            | (vec[2] as u64) << 8 * 5
+            | (vec[3] as u64) << 8 * 4
+            | (vec[4] as u64) << 8 * 3
+            | (vec[5] as u64) << 8 * 2
+            | (vec[6] as u64) << 8 * 1
+            | (vec[7] as u64);
         assert_eq!(next, expect);
         Ok(())
     }

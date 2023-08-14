@@ -1,22 +1,28 @@
-use bitvec::order::Lsb0;
-use bitvec::view::BitView;
-use log::warn;
 use std::ops::AddAssign;
 
+use bitvec::order::Msb0;
+use bitvec::prelude::BitVec;
+use bitvec::view::BitView;
+use log::warn;
+
 /// Calculates the prefix bit length between `a' and `b'.
-pub fn prefix_bit_length(a: u64, b: u64) -> u8 {
-    let zipped = a
-        .view_bits::<Lsb0>()
+pub fn prefix_bits(a: u64, b: u64) -> BitVec {
+    let a_vec = BitVec::from(a.view_bits::<Msb0>());
+    let b_vec = BitVec::from(b.view_bits::<Msb0>());
+
+    return a_vec
         .iter()
-        .zip(b.view_bits::<Lsb0>())
-        .rev()
-        .enumerate();
-    for (idx, (ai, bi)) in zipped {
-        if ai != bi {
-            return idx as u8;
-        }
-    }
-    64
+        .zip(b_vec)
+        .scan(BitVec::new(), |acc, (ai, bi)| {
+            return if ai != bi {
+                None
+            } else {
+                acc.push(*ai);
+                Some(acc.clone())
+            };
+        })
+        .last()
+        .unwrap_or(BitVec::new());
 }
 
 pub trait Cumsum {
@@ -47,9 +53,9 @@ pub fn cumsum_rescale(probs: Vec<f32>) -> Rescale {
     let range = u64::MAX - 0;
     let threshold = 1.0 / range as f32;
     let probs = probs
-        .into_iter()
+        .iter()
         // cutoff probabilities that would be rounded to 0
-        .filter(|p| *p >= threshold);
+        .filter(|p| **p >= threshold);
     let total_weights = probs.clone().sum::<f32>();
     let scaler = range as f32 / total_weights;
     let mut cumsum: Vec<u128> = probs
@@ -80,14 +86,17 @@ pub fn cumsum_rescale(probs: Vec<f32>) -> Rescale {
             Some(p as u64)
         })
         .collect();
-    let cumsum = cumsum.into_iter().map(|v| v as u64).collect();
+    let cumsum: Vec<u64> = cumsum.into_iter().map(|v| v as u64).collect();
     Rescale { probs, cumsum }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::util::{cumsum_rescale, prefix_bit_length, Rescale};
     use approx::assert_abs_diff_eq;
+    use bitvec::bitvec;
+    use bitvec::vec::BitVec;
+
+    use crate::util::{cumsum_rescale, prefix_bits, Rescale};
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -104,7 +113,7 @@ mod tests {
         assert_eq!(probs[0], (0.5 * u64::MAX as f32).floor() as u64);
         assert_eq!(cumsum[1], (0.8 * u64::MAX as f32).floor() as u64);
         assert_eq!(probs[1], (0.3 * u64::MAX as f32).floor() as u64);
-        assert_eq!(cumsum[2], (1.0 * u64::MAX as f32).floor() as u64);
+        assert_eq!(cumsum[2], u64::MAX);
         // we can't directly assert the last element, as rescaling might have updated its weight
         assert_abs_diff_eq!(
             probs[2],
@@ -116,64 +125,74 @@ mod tests {
     }
 
     #[test]
-    fn test_prefix_length() -> anyhow::Result<()> {
+    fn test_cumsum_rescale_weighted() -> anyhow::Result<()> {
+        let vec = vec![0.8741235, 0.062710986, 0.04070479, 0.012961245, 0.009499585];
+        let Rescale { probs, cumsum } = cumsum_rescale(vec);
+        assert_eq!(cumsum.len(), 5);
+        assert_eq!(*cumsum.last().unwrap(), u64::MAX);
+        assert_eq!(probs.iter().sum::<u64>(), *cumsum.last().unwrap());
+        Ok(())
+    }
+
+    #[test]
+    fn test_prefix_bits() -> anyhow::Result<()> {
         init();
-        #[derive(Debug)]
+        #[derive(Clone, Debug)]
         struct TCase {
             a: u64,
             b: u64,
-            res: u8,
+            res: BitVec,
         }
         let io: Vec<TCase> = vec![
             TCase {
                 a: 0,
                 b: 0,
-                res: 64,
+                res: bitvec![0; 64],
             },
             TCase {
                 a: u64::MAX,
                 b: u64::MAX,
-                res: 64,
+                res: bitvec![1; 64],
             },
             TCase {
                 a: 0,
                 b: u64::MAX,
-                res: 0,
+                res: BitVec::new(),
             },
             TCase {
                 a: u64::MAX,
                 b: 0,
-                res: 0,
+                res: BitVec::new(),
             },
             TCase {
                 a: 0,
                 b: u64::MAX,
-                res: 0,
+                res: BitVec::new(),
             },
             TCase {
                 a: 1 << 63,
                 b: 0,
-                res: 0,
+                res: BitVec::new(),
             },
             TCase {
                 a: u64::MAX,
                 b: 1 << 63,
-                res: 1,
+                res: bitvec![1u8; 1],
             },
             TCase {
                 a: 0xFFFFFFFF00000000,
                 b: 0xFFFFFFFFFFFFFFFF,
-                res: 32,
+                res: bitvec![1u8; 32],
             },
             TCase {
                 a: 0xFFFFFFFE00000000,
                 b: 0xFFFFFFFFFFFFFFFF,
-                res: 31,
+                res: bitvec![1u8; 31],
             },
         ];
-        for p in io {
-            let TCase { a, b, res } = p;
-            assert_eq!(prefix_bit_length(a, b), res, "{:?}", p);
+        for (idx, p) in io.into_iter().enumerate() {
+            let TCase { a, b, res } = p.clone();
+            assert_eq!(prefix_bits(a, b), res, "{}, {:?}", idx, p);
         }
         Ok(())
     }

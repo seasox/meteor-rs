@@ -7,9 +7,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use aes_gcm::aead::Aead;
-use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use env_logger;
 use llm;
@@ -19,9 +17,10 @@ use llm::{
     ModelParameters, Prompt, TokenId, Tokenizer, TokenizerSource,
 };
 use log::{debug, info};
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
-use crate::meteor_sampler::SamplerContainer;
+use crate::meteor_sampler::{MeteorDecodeSampler, MeteorEncodeSampler, SamplerContainer};
 use crate::token_trie::{TokenTrie, Trie};
 
 mod meteor_sampler;
@@ -59,6 +58,13 @@ enum ProgramMode {
         key_file: String,
         stego_text: String,
     },
+    EncodeDecode {
+        #[arg(long)]
+        context: String,
+        #[arg(long)]
+        key_file: String,
+        msg: String,
+    },
 }
 
 #[derive(Debug)]
@@ -71,19 +77,6 @@ impl Display for InferenceCallbackError {
 }
 
 impl Error for InferenceCallbackError {}
-
-#[derive(Debug)]
-enum MeteorError {
-    EncryptionFailure,
-}
-
-impl Display for MeteorError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl Error for MeteorError {}
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -101,9 +94,11 @@ fn main() -> Result<()> {
         },
         llm::load_progress_callback_stdout,
     )?;
-
     return match args.mode {
-        ProgramMode::Inference { context } => mode_inference(llama, &context),
+        ProgramMode::Inference { context } => {
+            let rng = rand::thread_rng();
+            mode_inference(llama, &context, rng)
+        }
         ProgramMode::Encode {
             context,
             key_file,
@@ -114,11 +109,28 @@ fn main() -> Result<()> {
             key_file,
             stego_text,
         } => mode_decode(&llama, &context, &key_file, &stego_text).map(|_| ()),
+        ProgramMode::EncodeDecode {
+            context,
+            key_file,
+            msg,
+        } => mode_decode(
+            &llama,
+            &context,
+            &key_file,
+            &mode_encode(&llama, &context, &key_file, &msg)?,
+        )
+        .map(|_| ()),
     };
 }
 
-fn mode_inference<M: Model>(model: M, context: &str) -> Result<()> {
-    let (res, s) = infer(&model, context, Arc::new(TopPTopK::default()))?;
+fn mode_inference<M: Model>(model: M, context: &str, rng: impl Rng) -> Result<()> {
+    let context: Vec<TokenId> = model
+        .tokenizer()
+        .tokenize(&context, false)?
+        .iter()
+        .map(|v| v.1)
+        .collect();
+    let (res, s) = infer(&model, &context, rng, Arc::new(TopPTopK::default()))?;
     println!("\n\nInference stats:\n{res}");
     println!("{}", s);
     Ok(())
@@ -126,27 +138,38 @@ fn mode_inference<M: Model>(model: M, context: &str) -> Result<()> {
 
 fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) -> Result<String> {
     info!("Loading key file {}...", key_file);
-    let _key = load_key(key_file)?;
+    let key = load_key(key_file)?;
     info!("Loading tokenizer...");
     let tokenizer = model.tokenizer();
     let tokens = tokenizer.get_tokens();
     info!("Loaded tokenizer with {} tokens", tokens.len());
+    info!("EOT: {:?}", tokenizer.token(model.eot_token_id() as usize));
+    info!(
+        "BOT: {:?}",
+        model.bot_token_id().map(|t| tokenizer.token(t as usize))
+    );
+    let context: Vec<TokenId> = tokenizer
+        .tokenize(&context, false)?
+        .iter()
+        .map(|v| v.1)
+        .collect();
     let trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
     assert!(trie.lookup(&model.eot_token_id()).is_some());
-    // TODO encrypt
-    //let ciphertext = encrypt(key, msg)?;
-
-    let (res, s) = infer(
-        model,
-        context,
-        Arc::new(SamplerContainer::new(trie, msg.as_bytes())),
-    )?;
+    let sampler = Arc::new(SamplerContainer::new(MeteorEncodeSampler::new(
+        trie,
+        msg.as_bytes().to_vec(),
+        key.cipher_rng,
+        key.pad_rng,
+    )));
+    let (res, s) = infer(model, &context, key.resample_rng, sampler)?;
     info!("Inference stats: {}", res);
+    println!("{}", "=".repeat(80));
     println!("{}", s);
+    println!("{}", "=".repeat(80));
     Ok(s)
 }
 
-fn mode_decode<M: Model>(
+fn mode_decode<'a, M: Model>(
     model: &M,
     context: &str,
     key_file: &str,
@@ -164,53 +187,96 @@ fn mode_decode<M: Model>(
     stego_text.drain(..context.len());
 
     info!("Loading key file {}...", key_file);
-    let _key = load_key(key_file)?;
+    let key = load_key(key_file)?;
     info!("Loading tokenizer...");
     let tokenizer = model.tokenizer();
     let tokens = tokenizer.get_tokens();
     info!("Loaded tokenizer with {} tokens", tokens.len());
-    let _trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
-    let tokenization = tokenizer.tokenize(&stego_text, false)?;
-    info!("Tokenization: {:?}", tokenization);
-    todo!("Decode")
+    let trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
+    let context_tokens: Vec<TokenId> = tokenizer
+        .tokenize(&context, false)?
+        .iter()
+        .map(|v| v.1)
+        .collect();
+    let mut special_token_ids = vec![model.eot_token_id()];
+    if let Some(bot) = model.bot_token_id() {
+        special_token_ids.push(bot);
+    }
+    let sampler = Arc::new(SamplerContainer::new(MeteorDecodeSampler::new(
+        trie,
+        tokenizer,
+        context_tokens.clone(),
+        stego_text.as_bytes().to_vec(),
+        special_token_ids,
+    )));
+    let sampler_arc = Arc::clone(&sampler);
+    let (stats, recovered_stego) = infer(model, &context_tokens, key.resample_rng, sampler)?;
+    info!("{:?}", stats);
+    let recovered_msg = sampler_arc.inner.lock().unwrap().recovered_bits.to_string();
+    println!("{}", recovered_msg);
+    assert_eq!(stego_text, recovered_stego[context.len()..]);
+    Ok(recovered_msg)
 }
 
-const KEY_BYTES: usize = 32;
-fn load_key(filename: &str) -> Result<[u8; KEY_BYTES]> {
+const KEY_BYTES: usize = 3 * 32;
+struct MeteorKey {
+    cipher_rng: StdRng,
+    resample_rng: StdRng,
+    pad_rng: StdRng,
+}
+fn load_key(filename: &str) -> Result<MeteorKey> {
     let f = File::open(filename);
-    return match f {
+    let key_bytes = match f {
         Ok(mut f) => {
             info!("Key file loaded");
             let mut key_bytes = [0; KEY_BYTES];
             f.read_exact(&mut key_bytes)?;
-            Ok(key_bytes)
+            key_bytes
         }
         Err(_) => {
             info!("Key file does not exist. Creating random key");
             let mut f = File::create(filename)?;
             let mut rng = rand::thread_rng();
-            let mut random_bytes = [0; KEY_BYTES];
+            let mut key_bytes = [0; KEY_BYTES];
             for i in 0..KEY_BYTES {
-                random_bytes[i] = rng.gen();
+                key_bytes[i] = rng.gen();
             }
-            f.write_all(&random_bytes)?;
-            Ok(random_bytes)
+            f.write_all(&key_bytes)?;
+            key_bytes
         }
     };
+    Ok(MeteorKey {
+        cipher_rng: StdRng::from_seed(
+            key_bytes[..32]
+                .try_into()
+                .with_context(|| "wrong key size")?,
+        ),
+        resample_rng: StdRng::from_seed(
+            key_bytes[32..64]
+                .try_into()
+                .with_context(|| "wrong key size")?,
+        ),
+        pad_rng: StdRng::from_seed(
+            key_bytes[64..]
+                .try_into()
+                .with_context(|| "wrong key size")?,
+        ),
+    })
 }
 
 fn infer<M: Model>(
     model: &M,
-    context: &str,
+    context: &[TokenId],
+    mut rng: impl Rng,
     sampler: Arc<dyn llm::Sampler>,
 ) -> Result<(InferenceStats, String)> {
     let mut session = model.start_session(Default::default());
     let mut s = String::new();
     let res = session.infer(
         model,
-        &mut rand::thread_rng(),
+        &mut rng,
         &llm::InferenceRequest {
-            prompt: Prompt::Text(context),
+            prompt: Prompt::Tokens(context),
             parameters: &InferenceParameters {
                 sampler,
                 ..Default::default()
@@ -221,9 +287,9 @@ fn infer<M: Model>(
         // llm::OutputRequest
         &mut Default::default(),
         |t| -> Result<InferenceFeedback, InferenceCallbackError> {
-            match t {
+            match &t {
                 InferenceResponse::InferredToken(t) | InferenceResponse::PromptToken(t) => {
-                    s.push_str(&t);
+                    s.push_str(t);
                 }
                 _ => {}
             }
@@ -231,15 +297,6 @@ fn infer<M: Model>(
         },
     )?;
     Ok((res, s))
-}
-
-fn encrypt(key: [u8; KEY_BYTES], msg: &str) -> Result<Vec<u8>, MeteorError> {
-    let key = Key::<Aes256Gcm>::from_slice(&key);
-    let cipher = Aes256Gcm::new(&key);
-    let nonce = Aes256Gcm::generate_nonce(rand::thread_rng());
-    cipher
-        .encrypt(&nonce, msg.as_ref())
-        .map_err(|_| MeteorError::EncryptionFailure)
 }
 
 trait GetTokens<TokenId, Token> {
