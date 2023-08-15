@@ -1,7 +1,6 @@
 use std::cmp::min;
 use std::fmt::{Debug, Formatter};
 
-use aes_gcm::aead::rand_core::Error;
 use anyhow::Context;
 use bitvec::field::BitField;
 use bitvec::order::Msb0;
@@ -13,7 +12,7 @@ use llm_samplers::prelude::{HasSamplerResources, Logits, Sampler, SamplerChain};
 use log::{debug, info};
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::StdRng;
-use rand::{Rng, RngCore};
+use rand::{Error, Rng, RngCore};
 
 use crate::token_trie::{TokenTrie, Trie};
 use crate::util::{cumsum_rescale, prefix_bits, Cumsum, Rescale};
