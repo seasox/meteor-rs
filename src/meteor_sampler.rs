@@ -7,7 +7,7 @@ use bitvec::field::BitField;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use bitvec::view::BitView;
-use llm::samplers::{build_sampler, default_samplers, ConfiguredSamplers};
+use llm::samplers::ConfiguredSamplers;
 use llm::{TokenId, Tokenizer};
 use llm_samplers::prelude::{HasSamplerResources, Logits, Sampler, SamplerChain};
 use log::{debug, info};
