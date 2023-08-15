@@ -207,6 +207,7 @@ fn mode_decode<'a, M: Model>(
         trie,
         tokenizer,
         context_tokens.clone(),
+        key.cipher_rng,
         stego_text.as_bytes().to_vec(),
         special_token_ids,
     )?));

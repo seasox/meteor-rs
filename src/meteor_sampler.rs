@@ -28,6 +28,8 @@ pub(crate) struct MeteorDecodeSampler {
     context: Vec<TokenId>,
     /// the stego text to decode
     stego_text: Vec<u8>,
+    /// the RNG used for decrypting the embedded message
+    cipher_rng: StdRng,
     /// a tokenizer
     tokenizer: Tokenizer,
     pub recovered_bits: BitVec<u8, Msb0>,
@@ -45,6 +47,7 @@ impl MeteorDecodeSampler {
         trie: TokenTrie,
         tokenizer: &Tokenizer,
         context: Vec<TokenId>,
+        cipher_rng: StdRng,
         stego_text: Vec<u8>,
         special_token_ids: Vec<TokenId>,
     ) -> anyhow::Result<MeteorDecodeSampler> {
@@ -56,6 +59,7 @@ impl MeteorDecodeSampler {
             token_id: None,
             trie,
             context,
+            cipher_rng,
             stego_text,
             tokenizer: match tokenizer {
                 Tokenizer::Embedded(t) => Tokenizer::Embedded(t.clone()),
@@ -232,11 +236,17 @@ impl Sampler<u32, f32> for MeteorDecodeSampler {
         let cumsum = dist.probs.cumsum(0);
         let lower = if idx > 0 { cumsum[idx - 1] } else { 0 };
         let upper = cumsum[idx];
-        let bits_encoded = prefix_bits(lower, upper);
-        if !bits_encoded.is_empty() {
-            info!("Recovered bits {}", bits_encoded)
+        let mut bits_encoded = prefix_bits(lower, upper);
+        let prefix_len = bits_encoded.len();
+        let key = self.cipher_rng.next_u64();
+        let key = key.view_bits::<Msb0>().to_bitvec();
+        bits_encoded.extend(BitVec::<u64, Msb0>::repeat(false, 64 - prefix_len));
+        bits_encoded ^= key;
+        bits_encoded = bits_encoded[..prefix_len].to_bitvec();
+        if prefix_len > 0 {
+            info!("Recovered bits {}", bits_encoded);
+            self.recovered_bits.extend(&bits_encoded);
         }
-        self.recovered_bits.extend(&bits_encoded);
         let tokens = &dist.tokens[idx];
 
         let token = if tokens.len() == 1 {
@@ -324,8 +334,7 @@ impl<R1: Rng, R2: Rng> RngCore for BitVecSampler<R1, R2> {
         };
         let next: u64 = source.load_be();
         let key: u64 = self.key_rng.gen();
-        // TODO encrypt
-        // let next = next ^ key;
+        let next = next ^ key;
         //debug!("sampled {:02X}", next);
         self.offset += 64;
         next
@@ -343,10 +352,29 @@ impl<R1: Rng, R2: Rng> RngCore for BitVecSampler<R1, R2> {
 
 #[cfg(test)]
 mod tests {
-    use rand::rngs::StdRng;
-    use rand::{RngCore, SeedableRng};
+    use rand::RngCore;
 
     use crate::meteor_sampler::BitVecSampler;
+
+    struct MockSampler;
+
+    impl RngCore for MockSampler {
+        fn next_u32(&mut self) -> u32 {
+            unimplemented!()
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            0
+        }
+
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            unimplemented!()
+        }
+
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand::Error> {
+            unimplemented!()
+        }
+    }
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -356,8 +384,9 @@ mod tests {
     fn test_bitvec_sampler() -> anyhow::Result<()> {
         init();
         let vec: Vec<u8> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
-        let key_rng = StdRng::seed_from_u64(0x00C0FFEE);
-        let pad_rng = StdRng::seed_from_u64(0xDEADBEEF);
+
+        let key_rng = MockSampler;
+        let pad_rng = MockSampler;
         let mut sampler = BitVecSampler::new(vec.clone(), key_rng, pad_rng);
         let next = sampler.next_u64();
         let expect = (vec[0] as u64) << 8 * 7
