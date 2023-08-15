@@ -28,7 +28,7 @@ pub(crate) struct MeteorDecodeSampler {
     stego_text: Vec<u8>,
     /// a tokenizer
     tokenizer: Tokenizer,
-    pub recovered_bits: BitVec<u8>,
+    pub recovered_bits: BitVec<u8, Msb0>,
     special_token_ids: Vec<TokenId>,
 }
 
