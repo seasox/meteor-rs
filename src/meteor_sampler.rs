@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::fmt::{Debug, Formatter};
-use std::sync::Mutex;
 
 use aes_gcm::aead::rand_core::Error;
 use anyhow::Context;
@@ -8,9 +7,10 @@ use bitvec::field::BitField;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use bitvec::view::BitView;
-use llm::{Sampler, TokenBias, TokenId, Tokenizer};
+use llm::samplers::{build_sampler, default_samplers, ConfiguredSamplers};
+use llm::{TokenId, Tokenizer};
+use llm_samplers::prelude::{HasSamplerResources, Logits, Sampler, SamplerChain};
 use log::{debug, info};
-use partial_sort::PartialSort;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::StdRng;
 use rand::{Rng, RngCore};
@@ -19,7 +19,9 @@ use crate::token_trie::{TokenTrie, Trie};
 use crate::util::{cumsum_rescale, prefix_bits, Cumsum, Rescale};
 
 pub(crate) struct MeteorDecodeSampler {
-    sampler_config: TopKTopPConfig,
+    chain: SamplerChain,
+    /// the last sampled token ID
+    token_id: Option<TokenId>,
     /// the token trie to sample from
     trie: TokenTrie,
     /// the byte array to embed (e.g. a ciphertext of a hidden message)
@@ -45,9 +47,13 @@ impl MeteorDecodeSampler {
         context: Vec<TokenId>,
         stego_text: Vec<u8>,
         special_token_ids: Vec<TokenId>,
-    ) -> MeteorDecodeSampler {
-        MeteorDecodeSampler {
-            sampler_config: TopKTopPConfig::default(),
+    ) -> anyhow::Result<MeteorDecodeSampler> {
+        let mut chain = ConfiguredSamplers::default();
+        chain.ensure_default_slots();
+        chain.ensure_valid()?;
+        Ok(MeteorDecodeSampler {
+            chain: chain.builder.into_chain(),
+            token_id: None,
             trie,
             context,
             stego_text,
@@ -57,45 +63,16 @@ impl MeteorDecodeSampler {
             },
             recovered_bits: BitVec::new(),
             special_token_ids,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct TopKTopPConfig {
-    /// The top K words by score are kept during sampling.
-    pub top_k: usize,
-    /// The cumulative probability after which no more words are kept for sampling.
-    pub top_p: f32,
-    /// The penalty for repeating tokens. Higher values make the generation less
-    /// likely to get into a loop, but may harm results when repetitive outputs
-    /// are desired.
-    pub repeat_penalty: f32,
-    /// Temperature (randomness) used for sampling. A higher number is more random.
-    pub temperature: f32,
-    /// A list of tokens to bias against in the process of generation.
-    pub bias_tokens: TokenBias,
-    /// The number of tokens to consider for the repetition penalty.
-    pub repetition_penalty_last_n: usize,
-}
-
-impl Default for TopKTopPConfig {
-    fn default() -> Self {
-        TopKTopPConfig {
-            top_k: 40,
-            top_p: 0.95,
-            repeat_penalty: 1.30,
-            temperature: 0.80,
-            bias_tokens: TokenBias::empty(),
-            repetition_penalty_last_n: 512,
-        }
+        })
     }
 }
 
 #[derive(Debug)]
 /// A sampler based on TopKTopP. Instead of an rng, this will use hidden message ciphertexts to select a msg
 pub(crate) struct MeteorEncodeSampler {
-    sampler_config: TopKTopPConfig,
+    chain: SamplerChain,
+    /// last sampled token ID
+    token_id: Option<TokenId>,
     /// the token trie to sample from
     trie: TokenTrie,
     /// the byte array to embed (e.g. a ciphertext of a hidden message)
@@ -103,186 +80,40 @@ pub(crate) struct MeteorEncodeSampler {
 }
 
 impl MeteorEncodeSampler {
-    pub fn new(trie: TokenTrie, msg: Vec<u8>, key_rng: StdRng, pad_rng: StdRng) -> Self {
-        MeteorEncodeSampler {
-            sampler_config: TopKTopPConfig::default(),
+    pub fn new(
+        trie: TokenTrie,
+        msg: Vec<u8>,
+        key_rng: StdRng,
+        pad_rng: StdRng,
+    ) -> anyhow::Result<Self> {
+        let mut chain = ConfiguredSamplers::default();
+        chain.ensure_default_slots();
+        chain.ensure_valid()?;
+        Ok(MeteorEncodeSampler {
+            chain: chain.builder.into_chain(),
+            token_id: None,
             trie,
             ciphertext: BitVecSampler::new(msg, key_rng, pad_rng),
-        }
+        })
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct SamplerContainer<T> {
-    pub(crate) inner: Mutex<T>,
-}
-
-impl<T: Default> Default for SamplerContainer<T> {
-    fn default() -> Self {
-        SamplerContainer {
-            inner: Mutex::new(Default::default()),
-        }
-    }
-}
-
-impl<S> SamplerContainer<S> {
-    pub fn new(sampler: S) -> Self {
-        SamplerContainer {
-            inner: Mutex::new(sampler),
-        }
-    }
-}
-
-impl<S: MutableSampler + Debug + Send + Sync> Sampler for SamplerContainer<S> {
-    fn sample(
-        &self,
-        previous_tokens: &[TokenId],
-        logits: &[f32],
-        rng: &mut dyn RngCore,
-    ) -> TokenId {
-        let mut sampler = self.inner.lock().unwrap();
-        sampler.sample(previous_tokens, logits, rng)
-    }
-}
-
-//region Preprocess Logits (Top-P Top-K)
-struct PreprocessedLogits {
-    token_ids: Vec<TokenId>,
-    probs: Vec<f32>,
-}
-fn preprocess_logits<'a>(
-    top_k: usize,
-    top_p: f32,
-    repeat_penalty: f32,
-    temperature: f32,
-    repetition_penalty_last_n: usize,
-    bias_tokens: &TokenBias,
-    logits: &'a [f32],
-    previous_tokens: &[TokenId],
-) -> PreprocessedLogits {
-    let n_logits = logits.len();
-    let mut logits_id = Vec::<(f32, TokenId)>::with_capacity(n_logits);
-
-    // TODO: consider if this can be modularized and this sampler can be composed out of multiple pieces,
-    // instead of having this monolithic function that embeds the repetition penalty and token bias
-    {
-        let scale = 1.0 / temperature;
-        for (i, &logit) in logits.iter().enumerate() {
-            let tid = i as TokenId;
-
-            let val = if let Some(logit_override) = bias_tokens.get(tid) {
-                logit_override
-            } else if previous_tokens[previous_tokens
-                .len()
-                .saturating_sub(repetition_penalty_last_n)..]
-                .contains(&(i as TokenId))
-            {
-                // repetition penalty from CTRL paper (https://arxiv.org/abs/1909.05858)
-                // credit https://github.com/facebookresearch/llama/compare/main...shawwn:llama:main
-
-                // if score < 0 then repetition penalty has to multiplied to reduce the previous token probability
-                if logits[i] < 0.0 {
-                    logit * scale * repeat_penalty
-                } else {
-                    logit * scale / repeat_penalty
-                }
-            } else {
-                logit * scale
-            };
-            logits_id.push((val, tid));
-        }
-    }
-
-    // find the top K tokens
-    {
-        logits_id.partial_sort(top_k, |a, b| {
-            // Sort descending
-            b.0.total_cmp(&a.0)
-        });
-        logits_id.truncate(top_k);
-    }
-
-    let token_weights = logits_id.iter().map(|x| x.0);
-    let mut token_ids: Vec<TokenId> = logits_id.iter().map(|x| x.1).collect();
-
-    let maxl = token_weights.max_by(f32::total_cmp).unwrap();
-
-    // compute probs for the top K tokens
-    let mut probs: Vec<f32> = logits_id
-        .iter()
-        .copied()
-        .map(|(k, _)| (k - maxl).exp())
-        .collect();
-    let sum: f32 = probs.iter().copied().sum();
-
-    // Normalize the probs
-    for p in probs.iter_mut() {
-        *p /= sum;
-    }
-
-    // Top p sampling
-    if top_p < 1.0 {
-        let mut cumsum = 0.0;
-        for i in 0..probs.len() {
-            cumsum += probs[i];
-            if cumsum >= top_p {
-                probs.truncate(i + 1);
-                token_ids.truncate(i + 1);
-                logits_id.truncate(i + 1);
-                break;
-            }
-        }
-
-        cumsum = 1.0 / cumsum;
-        for p in probs.iter_mut() {
-            *p *= cumsum;
-        }
-    }
-    PreprocessedLogits { token_ids, probs }
-}
-//endregion
-
-trait MutableSampler {
-    fn sample(
+impl Sampler<u32, f32> for MeteorEncodeSampler {
+    fn sample<'a>(
         &mut self,
-        previous_tokens: &[TokenId],
-        logits: &[f32],
-        rng: &mut dyn RngCore,
-    ) -> TokenId;
-}
-
-impl MutableSampler for MeteorEncodeSampler {
-    fn sample(
-        &mut self,
-        previous_tokens: &[TokenId],
-        logits: &[f32],
-        rng: &mut dyn RngCore,
-    ) -> TokenId {
+        res: &mut dyn HasSamplerResources<TokenId = u32>,
+        logits: &'a mut Logits<u32, f32>,
+    ) -> anyhow::Result<&'a mut Logits<u32, f32>> {
         let bits_remaining = self.ciphertext.bits_remaining();
         if bits_remaining == 0 {
             info!("Ciphertext embedded, returning EOT token");
-            return 2; // EOT token
+            self.token_id = Some(2); // TODO: use EOT token
+            return Ok(logits);
         }
-        let TopKTopPConfig {
-            top_k,
-            top_p,
-            repeat_penalty,
-            temperature,
-            repetition_penalty_last_n,
-            ..
-        } = self.sampler_config;
-        let bias_tokens = &self.sampler_config.bias_tokens;
-
-        let PreprocessedLogits { token_ids, probs } = preprocess_logits(
-            top_k,
-            top_p,
-            repeat_penalty,
-            temperature,
-            repetition_penalty_last_n,
-            bias_tokens,
-            logits,
-            previous_tokens,
-        );
+        let logits = self.chain.sample(res, logits)?;
+        logits.softmax()?;
+        let token_ids: Vec<u32> = logits.iter().map(|l| l.token_id).collect();
+        let probs: Vec<f32> = logits.iter().map(|l| l.prob).collect();
         assert_eq!(token_ids.len(), probs.len());
 
         let Rescale { probs, cumsum: _ } = cumsum_rescale(probs);
@@ -296,8 +127,6 @@ impl MutableSampler for MeteorEncodeSampler {
         //debug!("{:?}", self.trie);
 
         let dist = self.trie.distribution();
-        //let weighted = dist.weighted_index().expect("WeightedIndex error");
-        //let idx = weighted.sample(&mut self.ciphertext);
         let cumsum = dist.probs.cumsum(0);
         let coins: u64 = self.ciphertext.gen();
         let idx = cumsum
@@ -323,9 +152,9 @@ impl MutableSampler for MeteorEncodeSampler {
             self.ciphertext.offset,
         );
 
-        return if tokens.len() == 1 {
+        self.token_id = if tokens.len() == 1 {
             debug!("Simple distr: {}", tokens[0]);
-            tokens[0]
+            Some(tokens[0])
         } else {
             // resample
             let subtrie = self.trie.lookup(&dist.reprs[idx]).expect("Lookup failed");
@@ -333,50 +162,44 @@ impl MutableSampler for MeteorEncodeSampler {
             let probs = subtrie.probabilities();
             assert_eq!(st_tokens.len(), probs.len());
             let weighted = WeightedIndex::new(probs).expect("WeightedIndex error");
-            let st_idx = weighted.sample(rng);
+            let mut st_idx = None;
+            res.with_rng_mut(&mut |rng: &mut dyn RngCore| {
+                st_idx = Some(weighted.sample(rng));
+            })?;
             assert_eq!(&st_tokens, tokens);
-            let token = st_tokens[st_idx];
+            let token = st_tokens[st_idx.expect("sampling failed")];
             debug!("Resampled {} from subtrie {}", token, &dist.reprs[idx]);
-            token
+            Some(token)
         };
+        Ok(logits)
+    }
+
+    fn sampled_token_id(&self) -> Option<u32> {
+        self.token_id
     }
 }
 
-impl MutableSampler for MeteorDecodeSampler {
-    fn sample(
+impl Sampler<u32, f32> for MeteorDecodeSampler {
+    fn sample<'a>(
         &mut self,
-        previous_tokens: &[TokenId],
-        logits: &[f32],
-        rng: &mut dyn RngCore,
-    ) -> TokenId {
-        if self.context.eq(previous_tokens) {
-            info!("starting new stego decoder session");
-            self.recovered_bits.clear();
-        }
+        res: &mut dyn HasSamplerResources<TokenId = u32>,
+        logits: &'a mut Logits<u32, f32>,
+    ) -> anyhow::Result<&'a mut Logits<u32, f32>> {
+        res.with_last_tokens(&mut |previous_tokens| {
+            if self.context.eq(previous_tokens) {
+                info!("starting new stego decoder session");
+                self.recovered_bits.clear();
+            }
+        })?;
         if self.stego_text.is_empty() {
             info!("Decoding complete: EOT");
-            return 2;
+            self.token_id = Some(2); // TODO use eot_token_id
+            return Ok(logits);
         }
-        let TopKTopPConfig {
-            top_k,
-            top_p,
-            repeat_penalty,
-            temperature,
-            repetition_penalty_last_n,
-            ..
-        } = self.sampler_config;
-        let bias_tokens = &self.sampler_config.bias_tokens;
-
-        let PreprocessedLogits { token_ids, probs } = preprocess_logits(
-            top_k,
-            top_p,
-            repeat_penalty,
-            temperature,
-            repetition_penalty_last_n,
-            bias_tokens,
-            logits,
-            previous_tokens,
-        );
+        let logits = self.chain.sample(res, logits)?;
+        logits.softmax()?;
+        let token_ids: Vec<u32> = logits.iter().map(|l| l.token_id).collect();
+        let probs: Vec<f32> = logits.iter().map(|l| l.prob).collect();
         assert_eq!(token_ids.len(), probs.len());
 
         let Rescale { probs, cumsum: _ } = cumsum_rescale(probs);
@@ -426,9 +249,12 @@ impl MutableSampler for MeteorDecodeSampler {
             let probs = subtrie.probabilities();
             assert_eq!(st_tokens.len(), probs.len());
             let weighted = WeightedIndex::new(probs).expect("WeightedIndex error");
-            let st_idx = weighted.sample(rng);
+            let mut st_idx = None;
+            res.with_rng_mut(&mut |rng| {
+                st_idx = Some(weighted.sample(rng));
+            })?;
             assert_eq!(&st_tokens, tokens);
-            let token = st_tokens[st_idx];
+            let token = st_tokens[st_idx.expect("sample failed")];
             debug!("Resampled {} from subtrie {}", token, &dist.reprs[idx]);
             token
         };
@@ -442,7 +268,12 @@ impl MutableSampler for MeteorDecodeSampler {
             self.recovered_bits.len(),
             self.stego_text.len()
         );
-        token
+        self.token_id = Some(token);
+        Ok(logits)
+    }
+
+    fn sampled_token_id(&self) -> Option<u32> {
+        self.token_id
     }
 }
 

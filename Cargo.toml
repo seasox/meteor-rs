@@ -12,6 +12,7 @@ approx = "0.5.1"
 bitvec = "1.0.1"
 clap = { version = "4.3.16", features = ["derive"] }
 env_logger = "0.10.0"
+llm-samplers = "0.0.6"
 log = { version = "0.4.19", features = ["max_level_debug", "release_max_level_warn"] }
 partial_sort = "0.2.0"
 rand = "0.8.5"

@@ -5,22 +5,23 @@ use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use env_logger;
 use llm;
-use llm::samplers::TopPTopK;
+use llm::samplers::default_samplers;
 use llm::{
     InferenceFeedback, InferenceParameters, InferenceResponse, InferenceStats, Model,
     ModelParameters, Prompt, TokenId, Tokenizer, TokenizerSource,
 };
+use llm_samplers::prelude::Sampler;
 use log::{debug, error, info};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use crate::meteor_sampler::{MeteorDecodeSampler, MeteorEncodeSampler, SamplerContainer};
+use crate::meteor_sampler::{MeteorDecodeSampler, MeteorEncodeSampler};
 use crate::token_trie::{TokenTrie, Trie};
 
 mod meteor_sampler;
@@ -130,7 +131,7 @@ fn mode_inference<M: Model>(model: M, context: &str, rng: impl Rng) -> Result<()
         .iter()
         .map(|v| v.1)
         .collect();
-    let (res, s) = infer(&model, &context, rng, Arc::new(TopPTopK::default()))?;
+    let (res, s) = infer(&model, &context, rng, default_samplers())?;
     println!("\n\nInference stats:\n{res}");
     println!("{}", s);
     Ok(())
@@ -155,12 +156,12 @@ fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) ->
         .collect();
     let trie = TokenTrie::new(tokens.clone().into_iter().collect())?;
     assert!(trie.lookup(&model.eot_token_id()).is_some());
-    let sampler = Arc::new(SamplerContainer::new(MeteorEncodeSampler::new(
+    let sampler = Arc::new(Mutex::new(MeteorEncodeSampler::new(
         trie,
         msg.as_bytes().to_vec(),
         key.cipher_rng,
         key.pad_rng,
-    )));
+    )?));
     let (res, s) = infer(model, &context, key.resample_rng, sampler)?;
     info!("Inference stats: {}", res);
     println!("{}", "=".repeat(80));
@@ -202,17 +203,17 @@ fn mode_decode<'a, M: Model>(
     if let Some(bot) = model.bot_token_id() {
         special_token_ids.push(bot);
     }
-    let sampler = Arc::new(SamplerContainer::new(MeteorDecodeSampler::new(
+    let sampler = Arc::new(Mutex::new(MeteorDecodeSampler::new(
         trie,
         tokenizer,
         context_tokens.clone(),
         stego_text.as_bytes().to_vec(),
         special_token_ids,
-    )));
-    let sampler_arc = Arc::clone(&sampler);
-    let (stats, recovered_stego) = infer(model, &context_tokens, key.resample_rng, sampler)?;
+    )?));
+    let (stats, recovered_stego) =
+        infer(model, &context_tokens, key.resample_rng, sampler.clone())?;
     info!("{:?}", stats);
-    let recovered_msg = sampler_arc.inner.lock().unwrap().recovered_bits.clone();
+    let recovered_msg = sampler.lock().unwrap().recovered_bits.clone();
     let recovered_msg_len = recovered_msg.len();
     debug!("{}", recovered_msg);
     let byte_aligned_msg = &recovered_msg[..8 * recovered_msg_len / 8].to_bitvec();
@@ -280,7 +281,7 @@ fn infer<M: Model>(
     model: &M,
     context: &[TokenId],
     mut rng: impl Rng,
-    sampler: Arc<dyn llm::Sampler>,
+    sampler: Arc<Mutex<dyn Sampler<TokenId, f32>>>,
 ) -> Result<(InferenceStats, String)> {
     let mut session = model.start_session(Default::default());
     let mut s = String::new();
