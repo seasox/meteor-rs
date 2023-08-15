@@ -6,7 +6,7 @@ use bitvec::view::BitView;
 use log::warn;
 
 /// Calculates the prefix bit length between `a' and `b'.
-pub fn prefix_bits(a: u64, b: u64) -> BitVec {
+pub fn prefix_bits(a: u64, b: u64) -> BitVec<u64, Msb0> {
     let a_vec = BitVec::from(a.view_bits::<Msb0>());
     let b_vec = BitVec::from(b.view_bits::<Msb0>());
 
@@ -94,6 +94,7 @@ pub fn cumsum_rescale(probs: Vec<f32>) -> Rescale {
 mod tests {
     use approx::assert_abs_diff_eq;
     use bitvec::bitvec;
+    use bitvec::prelude::Lsb0;
     use bitvec::vec::BitVec;
 
     use crate::util::{cumsum_rescale, prefix_bits, Rescale};
@@ -142,57 +143,75 @@ mod tests {
             a: u64,
             b: u64,
             res: BitVec,
+            first: Option<bool>,
         }
         let io: Vec<TCase> = vec![
             TCase {
                 a: 0,
                 b: 0,
                 res: bitvec![0; 64],
+                first: Some(false),
             },
             TCase {
                 a: u64::MAX,
                 b: u64::MAX,
                 res: bitvec![1; 64],
+                first: Some(true),
             },
             TCase {
                 a: 0,
                 b: u64::MAX,
                 res: BitVec::new(),
+                first: None,
             },
             TCase {
                 a: u64::MAX,
                 b: 0,
                 res: BitVec::new(),
+                first: None,
             },
             TCase {
                 a: 0,
                 b: u64::MAX,
                 res: BitVec::new(),
+                first: None,
             },
             TCase {
                 a: 1 << 63,
                 b: 0,
                 res: BitVec::new(),
+                first: None,
             },
             TCase {
                 a: u64::MAX,
                 b: 1 << 63,
                 res: bitvec![1u8; 1],
+                first: Some(true),
             },
             TCase {
                 a: 0xFFFFFFFF00000000,
                 b: 0xFFFFFFFFFFFFFFFF,
                 res: bitvec![1u8; 32],
+                first: Some(true),
             },
             TCase {
                 a: 0xFFFFFFFE00000000,
                 b: 0xFFFFFFFFFFFFFFFF,
                 res: bitvec![1u8; 31],
+                first: Some(true),
+            },
+            TCase {
+                a: 0xAA55555555555555,
+                b: 0xAA10000000055555,
+                res: bitvec![1, 0, 1, 0, 1, 0, 1, 0, 0],
+                first: Some(true),
             },
         ];
         for (idx, p) in io.into_iter().enumerate() {
-            let TCase { a, b, res } = p.clone();
-            assert_eq!(prefix_bits(a, b), res, "{}, {:?}", idx, p);
+            let TCase { a, b, res, first } = p.clone();
+            let prefix = prefix_bits(a, b);
+            assert_eq!(prefix, res, "{}, {:?}", idx, p);
+            assert_eq!(prefix.get(0).map(|r| *r.as_ref()), first);
         }
         Ok(())
     }
