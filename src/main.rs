@@ -16,7 +16,7 @@ use llm::{
     InferenceFeedback, InferenceParameters, InferenceResponse, InferenceStats, Model,
     ModelParameters, Prompt, TokenId, Tokenizer, TokenizerSource,
 };
-use log::{debug, info};
+use log::{debug, error, info};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -212,7 +212,19 @@ fn mode_decode<'a, M: Model>(
     let sampler_arc = Arc::clone(&sampler);
     let (stats, recovered_stego) = infer(model, &context_tokens, key.resample_rng, sampler)?;
     info!("{:?}", stats);
-    let recovered_msg = sampler_arc.inner.lock().unwrap().recovered_bits.to_string();
+    let recovered_msg = sampler_arc.inner.lock().unwrap().recovered_bits.clone();
+    let recovered_msg_len = recovered_msg.len();
+    debug!("{}", recovered_msg);
+    let byte_aligned_msg = &recovered_msg[..8 * recovered_msg_len / 8].to_bitvec();
+    let bytes = byte_aligned_msg.as_raw_slice();
+    debug!("{:?}", bytes);
+    let recovered_msg = match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("msg is not a string: {}", e);
+            recovered_msg.to_string()
+        }
+    };
     println!("{}", recovered_msg);
     assert_eq!(stego_text, recovered_stego[context.len()..]);
     Ok(recovered_msg)
