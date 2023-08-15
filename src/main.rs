@@ -214,10 +214,10 @@ fn mode_decode<'a, M: Model>(
         infer(model, &context_tokens, key.resample_rng, sampler.clone())?;
     info!("{:?}", stats);
     let recovered_msg = sampler.lock().unwrap().recovered_bits.clone();
-    let recovered_msg_len = recovered_msg.len();
     debug!("{}", recovered_msg);
-    let byte_aligned_msg = &recovered_msg[..8 * recovered_msg_len / 8].to_bitvec();
-    let bytes = byte_aligned_msg.as_raw_slice();
+    let (_, byte_aligned, _) = unsafe { recovered_msg.align_to::<u8>() };
+    let bytes = byte_aligned.to_bitvec();
+    let bytes = bytes.as_raw_slice();
     debug!("{:?}", bytes);
     let recovered_msg = match String::from_utf8(bytes.to_vec()) {
         Ok(s) => s,
