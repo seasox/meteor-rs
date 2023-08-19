@@ -19,6 +19,13 @@ rand = "0.8.5"
 [profile.dev.package.ggml-sys]
 opt-level = 3
 
-[dependencies.llm]
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies.llm]
 path = "lib/llm/crates/llm"
-features = [ "metal" ]
+default-features = false
+features = [ "models", "metal" ]
+
+
+[target.'cfg(not(all(target_os = "macos", target_arch = "aarch64")))'.dependencies.llm]
+path = "lib/llm/crates/llm"
+default-features = false
+features = [ "models" ]
