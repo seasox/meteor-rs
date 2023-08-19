@@ -2,13 +2,12 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use env_logger;
 use llm;
@@ -19,12 +18,13 @@ use llm::{
 };
 use llm_samplers::prelude::Sampler;
 use log::{debug, error, info};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 
+use crate::key::MeteorKey;
 use crate::meteor_sampler::{MeteorDecodeSampler, MeteorEncodeSampler};
 use crate::token_trie::{TokenTrie, Trie};
 
+mod key;
 mod meteor_sampler;
 mod token_trie;
 mod util;
@@ -173,7 +173,7 @@ fn mode_inference<M: Model>(model: M, context: &str, rng: impl Rng) -> Result<()
 
 fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) -> Result<String> {
     info!("Loading key file {}...", key_file);
-    let key = load_key(key_file)?;
+    let key = MeteorKey::load_key(key_file)?;
     info!("Loading tokenizer...");
     let tokenizer = model.tokenizer();
     let tokens = tokenizer.get_tokens();
@@ -222,7 +222,7 @@ fn mode_decode<'a, M: Model>(
     stego_text.drain(..context.len());
 
     info!("Loading key file {}...", key_file);
-    let key = load_key(key_file)?;
+    let key = MeteorKey::load_key(key_file)?;
     info!("Loading tokenizer...");
     let tokenizer = model.tokenizer();
     let tokens = tokenizer.get_tokens();
@@ -264,52 +264,6 @@ fn mode_decode<'a, M: Model>(
     println!("{}", recovered_msg);
     assert_eq!(stego_text, recovered_stego[context.len()..]);
     Ok(recovered_msg)
-}
-
-const KEY_BYTES: usize = 3 * 32;
-struct MeteorKey {
-    cipher_rng: StdRng,
-    resample_rng: StdRng,
-    pad_rng: StdRng,
-}
-fn load_key(filename: &str) -> Result<MeteorKey> {
-    let f = File::open(filename);
-    let key_bytes = match f {
-        Ok(mut f) => {
-            info!("Key file loaded");
-            let mut key_bytes = [0; KEY_BYTES];
-            f.read_exact(&mut key_bytes)?;
-            key_bytes
-        }
-        Err(_) => {
-            info!("Key file does not exist. Creating random key");
-            let mut f = File::create(filename)?;
-            let mut rng = rand::thread_rng();
-            let mut key_bytes = [0; KEY_BYTES];
-            for i in 0..KEY_BYTES {
-                key_bytes[i] = rng.gen();
-            }
-            f.write_all(&key_bytes)?;
-            key_bytes
-        }
-    };
-    Ok(MeteorKey {
-        cipher_rng: StdRng::from_seed(
-            key_bytes[..32]
-                .try_into()
-                .with_context(|| "wrong key size")?,
-        ),
-        resample_rng: StdRng::from_seed(
-            key_bytes[32..64]
-                .try_into()
-                .with_context(|| "wrong key size")?,
-        ),
-        pad_rng: StdRng::from_seed(
-            key_bytes[64..]
-                .try_into()
-                .with_context(|| "wrong key size")?,
-        ),
-    })
 }
 
 fn infer<M: Model>(
