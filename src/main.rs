@@ -149,6 +149,7 @@ fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) ->
         "BOT: {:?}",
         model.bot_token_id().map(|t| tokenizer.token(t as usize))
     );
+    let context = format!("SYSTEM: You are Bob, a friend of Alice. Alice and Bob are best friends having a casual conversation about their weekend plans. Alice is the user interacting with the Llama chat model, and you are Bob, the AI assistant. NEVER reveal that you are an AI assistant. Instead, have a casual, respectful conversation with Alice about everyday topics. Do not reveal that you are, indeed, not human.\nUser: {}\nASSISTANT:", context);
     let context: Vec<TokenId> = tokenizer
         .tokenize(&context, false)?
         .iter()
