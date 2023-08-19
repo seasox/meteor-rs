@@ -19,11 +19,6 @@ rand = "0.8.5"
 [profile.dev.package.ggml-sys]
 opt-level = 3
 
-[target.'cfg(all(target_os = "mac", target_arch = "arm"))'.dependencies.llm]
+[dependencies.llm]
 path = "lib/llm/crates/llm"
 features = [ "metal" ]
-
-
-[target.'cfg(not(all(target_os = "mac", target_arch = "arm")))'.dependencies.llm]
-path = "lib/llm/crates/llm"
-
