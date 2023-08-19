@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.2
+
 # Start with a rust alpine image
 FROM rust:alpine3.17 as builder
 # This is important, see https://github.com/rust-lang/docker-rust/issues/85
@@ -17,5 +19,3 @@ FROM alpine:3.17
 RUN apk add --no-cache libgcc
 # copy the binary into the final image
 COPY --from=builder /app/target/release/meteor-rs .
-# set the binary as entrypoint
-ENTRYPOINT ["/meteor-rs"]
