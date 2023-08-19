@@ -127,6 +127,7 @@ mod tests {
 
     #[test]
     fn test_cumsum_rescale_weighted() -> anyhow::Result<()> {
+        init();
         let vec = vec![0.8741235, 0.062710986, 0.04070479, 0.012961245, 0.009499585];
         let Rescale { probs, cumsum } = cumsum_rescale(vec);
         assert_eq!(cumsum.len(), 5);
