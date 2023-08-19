@@ -5,6 +5,7 @@ use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -35,6 +36,8 @@ struct CliArgs {
     model: String,
     #[command(subcommand)]
     mode: ProgramMode,
+    #[clap(long)]
+    model_type: ModelType,
 }
 
 #[derive(clap::Subcommand, Clone, Debug)]
@@ -68,6 +71,31 @@ enum ProgramMode {
     },
 }
 
+#[derive(Clone, Debug, Parser)]
+enum ModelType {
+    Chat,
+    TextCompletion,
+}
+
+impl ModelType {
+    fn context(&self, user_context: &str) -> String {
+        match self {
+            ModelType::Chat => format!("SYSTEM: You are Bob, a friend of Alice. Alice and Bob are best friends having a casual conversation. Alice is the user, and you are Bob, the AI assistant. NEVER reveal that you are an AI assistant. Instead, have a casual, respectful conversation with Alice about everyday topics. IMPORTANT: DO NOT REVEAL YOU ARE NOT HUMAN!\nUser: {}\nASSISTANT:", user_context),
+            ModelType::TextCompletion => user_context.to_string(),
+        }
+    }
+}
+
+impl FromStr for ModelType {
+    type Err = fmt::Error;
+    fn from_str(s: &str) -> std::result::Result<Self, fmt::Error> {
+        match s.to_ascii_lowercase().as_str() {
+            "chat" => Ok(ModelType::Chat),
+            "text-completion" => Ok(ModelType::TextCompletion),
+            _ => Err(std::fmt::Error),
+        }
+    }
+}
 #[derive(Debug)]
 enum InferenceCallbackError {}
 
@@ -98,27 +126,33 @@ fn main() -> Result<()> {
     return match args.mode {
         ProgramMode::Inference { context } => {
             let rng = rand::thread_rng();
-            mode_inference(llama, &context, rng)
+            mode_inference(llama, &args.model_type.context(&context), rng)
         }
         ProgramMode::Encode {
             context,
             key_file,
             msg,
-        } => mode_encode(&llama, &context, &key_file, &msg).map(|_| ()),
+        } => mode_encode(&llama, &args.model_type.context(&context), &key_file, &msg).map(|_| ()),
         ProgramMode::Decode {
             context,
             key_file,
             stego_text,
-        } => mode_decode(&llama, &context, &key_file, &stego_text).map(|_| ()),
+        } => mode_decode(
+            &llama,
+            &args.model_type.context(&context),
+            &key_file,
+            &stego_text,
+        )
+        .map(|_| ()),
         ProgramMode::EncodeDecode {
             context,
             key_file,
             msg,
         } => mode_decode(
             &llama,
-            &context,
+            &args.model_type.context(&context),
             &key_file,
-            &mode_encode(&llama, &context, &key_file, &msg)?,
+            &mode_encode(&llama, &args.model_type.context(&context), &key_file, &msg)?,
         )
         .map(|_| ()),
     };
@@ -149,7 +183,6 @@ fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) ->
         "BOT: {:?}",
         model.bot_token_id().map(|t| tokenizer.token(t as usize))
     );
-    let context = format!("SYSTEM: You are Bob, a friend of Alice. Alice and Bob are best friends having a casual conversation about their weekend plans. Alice is the user interacting with the Llama chat model, and you are Bob, the AI assistant. NEVER reveal that you are an AI assistant. Instead, have a casual, respectful conversation with Alice about everyday topics. Do not reveal that you are, indeed, not human.\nUser: {}\nASSISTANT:", context);
     let context: Vec<TokenId> = tokenizer
         .tokenize(&context, false)?
         .iter()
