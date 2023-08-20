@@ -64,20 +64,25 @@ pub fn cumsum_rescale(probs: Vec<f32>) -> Rescale {
         .map(|p| p.round() as u128)
         .collect::<Vec<u128>>()
         .cumsum(0);
-    // find overflow
-    let mut cumsum_iter = cumsum.iter_mut();
-    fn find_overfill(x: &&mut u128) -> bool {
+    // find over/underflow
+    fn find_overfill(x: &&u128) -> bool {
         **x > u64::MAX as u128
     }
-    let overfill = cumsum_iter.find(find_overfill);
-    if let Some(overfill) = overfill {
+    let last = cumsum.last_mut().expect("cumsum is empty");
+    if *last > range as u128 {
         warn!(
             "Rescale caused overflow, remove weight {} from last element",
-            (*overfill - range as u128) as f32 / *overfill as f32
+            (*last - range as u128) as f32 / *last as f32
         );
-        *overfill = range as u128;
+        *last = range as u128;
+    } else if *last < range as u128 {
+        warn!(
+            "Rescale caused underflow, add weight {} to last element",
+            (range as u128 - *last) as f32 / *last as f32
+        );
+        *last = range as u128;
     }
-    assert_eq!(cumsum_iter.find(find_overfill), None);
+    assert_eq!(cumsum.iter().find(find_overfill), None);
     let probs: Vec<u64> = cumsum
         .iter()
         .scan(0, |prev, curr| {
