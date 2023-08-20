@@ -52,6 +52,8 @@ pub(crate) struct MeteorDecodeSampler {
     tokenizer: Tokenizer,
     pub recovered_bits: BitVec<u8, Msb0>,
     special_token_ids: Vec<TokenId>,
+    /// the model's EOT token
+    eot_token_id: TokenId,
 }
 
 impl Debug for MeteorDecodeSampler {
@@ -68,6 +70,7 @@ impl MeteorDecodeSampler {
         cipher_rng: StdRng,
         stego_text: Vec<u8>,
         special_token_ids: Vec<TokenId>,
+        eot_token_id: TokenId,
     ) -> Self {
         let chain = make_default_chain();
         MeteorDecodeSampler {
@@ -83,6 +86,7 @@ impl MeteorDecodeSampler {
             },
             recovered_bits: BitVec::new(),
             special_token_ids,
+            eot_token_id,
         }
     }
 }
@@ -97,16 +101,25 @@ pub(crate) struct MeteorEncodeSampler {
     trie: TokenTrie,
     /// the byte array to embed (e.g. a ciphertext of a hidden message)
     ciphertext: BitVecSampler,
+    /// the model's EOT token
+    eot_token_id: TokenId,
 }
 
 impl MeteorEncodeSampler {
-    pub fn new(trie: TokenTrie, msg: Vec<u8>, key_rng: StdRng, pad_rng: StdRng) -> Self {
+    pub fn new(
+        trie: TokenTrie,
+        msg: Vec<u8>,
+        key_rng: StdRng,
+        pad_rng: StdRng,
+        eot_token_id: TokenId,
+    ) -> Self {
         let chain = make_default_chain();
         MeteorEncodeSampler {
             chain,
             token_id: None,
             trie,
             ciphertext: BitVecSampler::new(msg, key_rng, pad_rng),
+            eot_token_id,
         }
     }
 }
@@ -120,9 +133,13 @@ impl Sampler<u32, f32> for MeteorEncodeSampler {
         let bits_remaining = self.ciphertext.bits_remaining();
         if bits_remaining == 0 {
             info!("Ciphertext embedded, returning EOT token");
-            self.token_id = Some(2); // TODO: use EOT token
+            self.token_id = Some(self.eot_token_id);
             return Ok(logits);
         }
+        logits
+            .get_mut(self.eot_token_id as usize)
+            .expect("no EOT token")
+            .logit = f32::MIN;
         let logits = self.chain.sample(res, logits)?;
         logits.softmax()?;
         let token_ids: Vec<u32> = logits.iter().map(|l| l.token_id).collect();
@@ -206,9 +223,13 @@ impl Sampler<u32, f32> for MeteorDecodeSampler {
         })?;
         if self.stego_text.is_empty() {
             info!("Decoding complete: EOT");
-            self.token_id = Some(2); // TODO use eot_token_id
+            self.token_id = Some(self.eot_token_id);
             return Ok(logits);
         }
+        logits
+            .get_mut(self.eot_token_id as usize)
+            .expect("no EOT token")
+            .logit = f32::MIN;
         let logits = self.chain.sample(res, logits)?;
         logits.softmax()?;
         let token_ids: Vec<u32> = logits.iter().map(|l| l.token_id).collect();

@@ -195,6 +195,7 @@ fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) ->
         msg.as_bytes().to_vec(),
         key.cipher_rng,
         key.pad_rng,
+        model.eot_token_id(),
     )));
     let (res, s) = infer(model, &context, key.resample_rng, sampler)?;
     info!("Inference stats: {}", res);
@@ -244,6 +245,7 @@ fn mode_decode<'a, M: Model>(
         key.cipher_rng,
         stego_text.as_bytes().to_vec(),
         special_token_ids,
+        model.eot_token_id(),
     )));
     let (stats, recovered_stego) =
         infer(model, &context_tokens, key.resample_rng, sampler.clone())?;
