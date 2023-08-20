@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.2
 
 # Start with a rust alpine image
-FROM nvidia/cuda:11.2.2-runtime-ubuntu22.04 as builder
+FROM nvidia/cuda:11.2.2-runtime-ubuntu20.04 as builder
 
 # Update default packages
 RUN apt-get update
@@ -52,7 +52,7 @@ RUN cargo build --release --bin meteor-rs
 RUN strip target/release/meteor-rs
 
 # use a plain alpine image, the alpine version needs to match the builder
-FROM nvidia/cuda:11.2.2-runtime-ubuntu22.04
+FROM nvidia/cuda:11.2.2-runtime-ubuntu20.04
 # if needed, install additional dependencies here
 # copy the binary into the final image
 COPY --from=builder /app/target/release/meteor-rs .
