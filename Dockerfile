@@ -3,13 +3,17 @@
 # Start with a rust alpine image
 FROM nvidia/cuda:11.2.2-runtime-ubuntu20.04 as builder
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 # Update default packages
 RUN apt-get update
 
 # Get Ubuntu packages
 RUN apt-get install -y \
     build-essential \
-    curl xz-utils pkg-config libssl-dev zlib1g-dev libtinfo-dev libxml2-dev \
+    pkg-config \
+    xz-utils \
+    curl \
     git
 
 # Update new packages
@@ -51,8 +55,22 @@ RUN git clone --recurse-submodules https://github.com/seasox/meteor-rs /app
 RUN cargo build --release --bin meteor-rs
 RUN strip target/release/meteor-rs
 
-# use a plain alpine image, the alpine version needs to match the builder
 FROM nvidia/cuda:11.2.2-runtime-ubuntu20.04
+
+# set env
+ENV LLVM_CONFIG=/root/llvm/bin/llvm-config
+ENV CUDA_ROOT=/usr/local/cuda
+ENV CUDA_PATH=$CUDA_ROOT
+ENV LLVM_LINK_STATIC=1
+ENV RUST_LOG=info
+ENV PATH=$CUDA_ROOT/nvvm/lib64:/root/.cargo/bin:$PATH
+
+# make ld aware of necessary *.so libraries
+RUN echo $CUDA_ROOT/lib64 >> /etc/ld.so.conf &&\
+    echo $CUDA_ROOT/compat >> /etc/ld.so.conf &&\
+    echo $CUDA_ROOT/nvvm/lib64 >> /etc/ld.so.conf &&\
+    ldconfig
+
 # if needed, install additional dependencies here
 # copy the binary into the final image
 COPY --from=builder /app/target/release/meteor-rs .
