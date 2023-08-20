@@ -9,7 +9,8 @@ RUN apt-get update
 # Get Ubuntu packages
 RUN apt-get install -y \
     build-essential \
-    curl xz-utils pkg-config libssl-dev zlib1g-dev libtinfo-dev libxml2-dev
+    curl xz-utils pkg-config libssl-dev zlib1g-dev libtinfo-dev libxml2-dev \
+    git
 
 # Update new packages
 RUN apt-get update
@@ -45,7 +46,7 @@ WORKDIR /app
 # DEVEL: copy PWD to /app
 # COPY ./ /app
 # AI-LAB: pull repo
-RUN git pull https://github.com/seasox/meteor-rs /app
+RUN git clone --recurse-submodules https://github.com/seasox/meteor-rs /app
 # do a release build
 RUN cargo build --release --bin meteor-rs
 RUN strip target/release/meteor-rs
