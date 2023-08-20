@@ -6,9 +6,8 @@ use bitvec::field::BitField;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use bitvec::view::BitView;
-use llm::samplers::ConfiguredSamplers;
 use llm::{TokenId, Tokenizer};
-use llm_samplers::prelude::{HasSamplerResources, Logits, Sampler, SamplerChain};
+use llm_samplers::prelude::*;
 use log::{debug, info};
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::StdRng;
@@ -16,6 +15,26 @@ use rand::{Error, Rng, RngCore};
 
 use crate::token_trie::{TokenTrie, Trie};
 use crate::util::{cumsum_rescale, prefix_bits, Cumsum, Rescale};
+
+fn make_default_chain() -> SamplerChain {
+    SamplerChain::<u32, f32>::new()
+        // apply penalty for token repetition
+        + SampleRepetition::default().penalty(1.30).last_n(64)
+        // apply penalty for the last 64 tokens
+        + SampleFreqPresence::default().last_n(64)
+        // penalize repeating sequence of tokens
+        + SampleSeqRepetition::default()
+        // cut-off top 40 tokens
+        + SampleTopK::default().k(40)
+        // apply Tail-free sampling (https://www.trentonbricken.com/Tail-Free-Sampling/)
+        + SampleTailFree::default()
+        // maximize "human-like" output
+        + SampleLocallyTypical::default()
+        // cut-off top 95 % tokens
+        + SampleTopP::default().p(0.95)
+        // apply temperature
+        + SampleTemperature::default().temperature(0.8)
+}
 
 pub(crate) struct MeteorDecodeSampler {
     chain: SamplerChain,
@@ -49,12 +68,10 @@ impl MeteorDecodeSampler {
         cipher_rng: StdRng,
         stego_text: Vec<u8>,
         special_token_ids: Vec<TokenId>,
-    ) -> anyhow::Result<MeteorDecodeSampler> {
-        let mut chain = ConfiguredSamplers::default();
-        chain.ensure_default_slots();
-        chain.ensure_valid()?;
-        Ok(MeteorDecodeSampler {
-            chain: chain.builder.into_chain(),
+    ) -> Self {
+        let chain = make_default_chain();
+        MeteorDecodeSampler {
+            chain,
             token_id: None,
             trie,
             context,
@@ -66,7 +83,7 @@ impl MeteorDecodeSampler {
             },
             recovered_bits: BitVec::new(),
             special_token_ids,
-        })
+        }
     }
 }
 
@@ -83,21 +100,14 @@ pub(crate) struct MeteorEncodeSampler {
 }
 
 impl MeteorEncodeSampler {
-    pub fn new(
-        trie: TokenTrie,
-        msg: Vec<u8>,
-        key_rng: StdRng,
-        pad_rng: StdRng,
-    ) -> anyhow::Result<Self> {
-        let mut chain = ConfiguredSamplers::default();
-        chain.ensure_default_slots();
-        chain.ensure_valid()?;
-        Ok(MeteorEncodeSampler {
-            chain: chain.builder.into_chain(),
+    pub fn new(trie: TokenTrie, msg: Vec<u8>, key_rng: StdRng, pad_rng: StdRng) -> Self {
+        let chain = make_default_chain();
+        MeteorEncodeSampler {
+            chain,
             token_id: None,
             trie,
             ciphertext: BitVecSampler::new(msg, key_rng, pad_rng),
-        })
+        }
     }
 }
 
