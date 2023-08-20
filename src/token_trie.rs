@@ -172,8 +172,8 @@ impl TrieNode {
         ret
     }
     pub fn distribution(&self) -> Distribution {
-        match self.token_id {
-            None => {
+        match (self.token_id, self.probability) {
+            (None, _) | (_, None) | (_, Some(0)) => {
                 // the current node is a split node. Bubble down
                 let mut distr = Distribution::default();
                 for edge in self.edges.values() {
@@ -181,17 +181,13 @@ impl TrieNode {
                 }
                 distr
             }
-            Some(token_id) => {
+            (Some(token_id), Some(prob)) => {
+                assert!(prob > 0);
                 return if self.edges.is_empty() {
-                    let prob: Prob = self.probability.iter().cloned().sum();
-                    if prob > 0 as Prob {
-                        Distribution {
-                            reprs: vec![token_id.clone()],
-                            tokens: vec![vec![token_id.clone()]],
-                            probs: vec![prob],
-                        }
-                    } else {
-                        Default::default()
+                    Distribution {
+                        reprs: vec![token_id.clone()],
+                        tokens: vec![vec![token_id.clone()]],
+                        probs: vec![prob],
                     }
                 } else {
                     // the current node has a token ID assigned and child nodes -> not uniquely decodable
@@ -659,6 +655,28 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_prob_repr() -> Result<()> {
+        init();
+        let tokens = create_tokens(vec!["Alice", "an", "at", "a"]);
+        let mut trie = TokenTrie::new(tokens.clone())?;
+        let probs = create_probs(&tokens, vec![1u8, 4, 2, 0]);
+        trie.update(&probs);
+
+        println!("{:?}", trie);
+
+        let d = trie.distribution();
+        let reprs = d.reprs;
+        let tokens = d.tokens;
+        let probs = d.probs;
+
+        assert_eq!(tokens, vec![vec![0], vec![1], vec![2]]);
+        assert_eq!(probs, vec![1u64, 4, 2]);
+        assert_eq!(reprs, vec![0, 1, 2]);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_update_reset() -> Result<()> {
         init();
         let tokens = create_tokens(vec!["Alice", "an", "ant", "a"]);
@@ -695,8 +713,7 @@ mod tests {
 
         println!("{:?}", trie);
 
-        // TODO this is kinda weird: the representative is 3, but 3 is not sampleable (due to 3 having 0 prob). We should fix this
-        assert_eq!(reprs, vec![3]);
+        assert_eq!(reprs, vec![2]);
         assert_eq!(tokens, vec![vec![2]]);
         assert_eq!(probs, vec![22]);
 
