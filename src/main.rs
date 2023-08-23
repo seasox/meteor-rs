@@ -42,6 +42,7 @@ struct CliArgs {
 
 #[derive(clap::Subcommand, Clone, Debug)]
 enum ProgramMode {
+    #[command(arg_required_else_help = true)]
     Inference {
         #[arg(long)]
         context: String,
@@ -62,6 +63,7 @@ enum ProgramMode {
         key_file: String,
         stego_text: String,
     },
+    #[command(arg_required_else_help = true)]
     EncodeDecode {
         #[arg(long)]
         context: String,
@@ -69,6 +71,7 @@ enum ProgramMode {
         key_file: String,
         msg: String,
     },
+    Reproduce,
 }
 
 #[derive(Clone, Debug, Parser)]
@@ -77,12 +80,52 @@ enum ModelType {
     TextCompletion,
 }
 
+const SYSTEM_PROMPT: &str =
+    "A chat between Alice and Bob. Alice and Bob are good friends talking about daily topics.";
+const HUMAN_IDENTIFIER: &str = "Alice:";
+const ASSISTANT_IDENTIFIER: &str = "Bob:";
+
 impl ModelType {
     fn context(&self, user_context: &str) -> String {
         match self {
-            ModelType::Chat => format!("SYSTEM: You are Bob, a friend of Alice. Alice and Bob are best friends having a casual conversation. Alice is the user, and you are Bob, the AI assistant. NEVER reveal that you are an AI assistant. Instead, have a casual, respectful conversation with Alice about everyday topics. IMPORTANT: DO NOT REVEAL YOU ARE NOT HUMAN!\nUser: {}\nASSISTANT:", user_context),
+            ModelType::Chat => format!(
+                "{}\n{} {}\n{}",
+                SYSTEM_PROMPT, HUMAN_IDENTIFIER, user_context, ASSISTANT_IDENTIFIER
+            ),
             ModelType::TextCompletion => user_context.to_string(),
         }
+    }
+
+    fn full_output(&self, user_context: &str, inferred: &str) -> String {
+        match self {
+            ModelType::Chat => format!("{}{}", self.context(user_context), inferred),
+            ModelType::TextCompletion => format!("{}{}", self.context(user_context), inferred),
+        }
+    }
+
+    /// a sampler callback that appends inferred and prompt tokens to `out_str`
+    fn callback<'a>(
+        &self,
+        out_str: &'a mut String,
+    ) -> Box<dyn FnMut(InferenceResponse) -> Result<InferenceFeedback, InferenceCallbackError> + 'a>
+    {
+        return match self {
+            ModelType::Chat => Box::new(llm::conversation_inference_callback(
+                HUMAN_IDENTIFIER,
+                |s| out_str.push_str(&s),
+            )),
+            ModelType::TextCompletion => {
+                Box::new(|t| -> Result<InferenceFeedback, InferenceCallbackError> {
+                    match &t {
+                        InferenceResponse::InferredToken(t) | InferenceResponse::PromptToken(t) => {
+                            out_str.push_str(t)
+                        }
+                        _ => {}
+                    }
+                    Ok(InferenceFeedback::Continue)
+                })
+            }
+        };
     }
 }
 
@@ -126,52 +169,67 @@ fn main() -> Result<()> {
     return match args.mode {
         ProgramMode::Inference { context } => {
             let rng = rand::thread_rng();
-            mode_inference(llama, &args.model_type.context(&context), rng)
+            mode_inference(llama, &args.model_type, &context, rng)
         }
         ProgramMode::Encode {
             context,
             key_file,
             msg,
-        } => mode_encode(&llama, &args.model_type.context(&context), &key_file, &msg).map(|_| ()),
+        } => mode_encode(&llama, &args.model_type, &context, &key_file, &msg).map(|_| ()),
         ProgramMode::Decode {
             context,
             key_file,
             stego_text,
-        } => mode_decode(
-            &llama,
-            &args.model_type.context(&context),
-            &key_file,
-            &stego_text,
-        )
-        .map(|_| ()),
+        } => mode_decode(&llama, &args.model_type, &context, &key_file, &stego_text).map(|_| ()),
         ProgramMode::EncodeDecode {
             context,
             key_file,
             msg,
         } => mode_decode(
             &llama,
-            &args.model_type.context(&context),
+            &args.model_type,
+            &context,
             &key_file,
-            &mode_encode(&llama, &args.model_type.context(&context), &key_file, &msg)?,
+            &mode_encode(&llama, &args.model_type, &context, &key_file, &msg)?,
         )
         .map(|_| ()),
+        ProgramMode::Reproduce => mode_reproduce(&llama).map(|_| ()),
     };
 }
 
-fn mode_inference<M: Model>(model: M, context: &str, rng: impl Rng) -> Result<()> {
+fn mode_inference<M: Model>(
+    model: M,
+    model_type: &ModelType,
+    user_context: &str,
+    rng: impl Rng,
+) -> Result<()> {
+    let context = model_type.context(user_context);
     let context: Vec<TokenId> = model
         .tokenizer()
         .tokenize(&context, false)?
         .iter()
         .map(|v| v.1)
         .collect();
-    let (res, s) = infer(&model, &context, rng, default_samplers())?;
+    let mut s = String::new();
+    let res = infer(
+        &model,
+        &context,
+        rng,
+        model_type.callback(&mut s),
+        default_samplers(),
+    )?;
     println!("\n\nInference stats:\n{res}");
-    println!("{}", s);
+    println!("{}", model_type.full_output(user_context, &s));
     Ok(())
 }
 
-fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) -> Result<String> {
+fn mode_encode<M: Model>(
+    model: &M,
+    model_type: &ModelType,
+    context: &str,
+    key_file: &str,
+    msg: &str,
+) -> Result<String> {
     info!("Loading key file {}...", key_file);
     let key = MeteorKey::load_key(key_file)?;
     info!("Loading tokenizer...");
@@ -183,6 +241,7 @@ fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) ->
         "BOT: {:?}",
         model.bot_token_id().map(|t| tokenizer.token(t as usize))
     );
+    let context = model_type.context(context);
     let context: Vec<TokenId> = tokenizer
         .tokenize(&context, false)?
         .iter()
@@ -197,7 +256,14 @@ fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) ->
         key.pad_rng,
         model.eot_token_id(),
     )));
-    let (res, s) = infer(model, &context, key.resample_rng, sampler)?;
+    let mut s = String::new();
+    let res = infer(
+        model,
+        &context,
+        key.resample_rng,
+        model_type.callback(&mut s),
+        sampler,
+    )?;
     info!("Inference stats: {}", res);
     println!("{}", "=".repeat(80));
     println!("{}", s);
@@ -205,8 +271,9 @@ fn mode_encode<M: Model>(model: &M, context: &str, key_file: &str, msg: &str) ->
     Ok(s)
 }
 
-fn mode_decode<'a, M: Model>(
+fn mode_decode<M: Model>(
     model: &M,
+    model_type: &ModelType,
     context: &str,
     key_file: &str,
     stego_text: &str,
@@ -219,8 +286,11 @@ fn mode_decode<'a, M: Model>(
     }
     info!("Loaded stego text \"{}\"", &stego_text);
 
-    assert_eq!(&stego_text[..context.len()], context);
-    stego_text.drain(..context.len());
+    let context = model_type.context(context);
+
+    if stego_text.starts_with(&context) {
+        stego_text.drain(..context.len());
+    }
 
     info!("Loading key file {}...", key_file);
     let key = MeteorKey::load_key(key_file)?;
@@ -247,8 +317,14 @@ fn mode_decode<'a, M: Model>(
         special_token_ids,
         model.eot_token_id(),
     )));
-    let (stats, recovered_stego) =
-        infer(model, &context_tokens, key.resample_rng, sampler.clone())?;
+    let mut recovered_stego = String::new();
+    let stats = infer(
+        model,
+        &context_tokens,
+        key.resample_rng,
+        model_type.callback(&mut recovered_stego),
+        sampler.clone(),
+    )?;
     info!("{:?}", stats);
     let recovered_msg = sampler.lock().unwrap().recovered_bits.clone();
     debug!("{}", recovered_msg);
@@ -264,43 +340,71 @@ fn mode_decode<'a, M: Model>(
         }
     };
     println!("{}", recovered_msg);
-    assert_eq!(stego_text, recovered_stego[context.len()..]);
+    assert_eq!(stego_text, recovered_stego);
     Ok(recovered_msg)
+}
+
+struct Stats {}
+fn mode_reproduce<'a, M: Model>(model: &M) -> Result<Stats> {
+    let questions = vec![
+        "What is the derivative of f(x)=x^2?",
+        "What is the capital city of France?",
+        "Which planet is known as the \"Red Planet\"?",
+        "What is the largest mammal in the world?",
+        "Who wrote the play \"Romeo and Juliet\"?",
+        "What is the chemical symbol for gold?",
+        "Which famous scientist developed the theory of relativity?",
+        "What is the tallest mountain in the world?",
+        "What is the process by which plants make their own food using sunlight?",
+        "What is the smallest prime number?",
+        "In which year did the United States declare its independence from Great Britain?",
+    ];
+    let answers: Vec<&str> = vec![
+        "2x+C",
+        "Paris",
+        "Mars",
+        "The blue whale",
+        "William Shakespeare",
+        "Au",
+        "Albert Einstein",
+        "Mount Everest",
+        "Photosynthesis",
+        "2",
+        "1776",
+    ];
+    for (q, _) in questions
+        .into_iter()
+        .zip(answers)
+        .collect::<Vec<(&str, &str)>>()
+    {
+        let a2 = mode_encode(model, &ModelType::Chat, &q, "key.bin", "msg")?;
+        println!("{}: {}", q, a2);
+    }
+    Ok(Stats {})
 }
 
 fn infer<M: Model>(
     model: &M,
     context: &[TokenId],
     mut rng: impl Rng,
+    callback: impl FnMut(InferenceResponse) -> Result<InferenceFeedback, InferenceCallbackError>,
     sampler: Arc<Mutex<dyn Sampler<TokenId, f32>>>,
-) -> Result<(InferenceStats, String)> {
+) -> Result<InferenceStats> {
     let mut session = model.start_session(Default::default());
-    let mut s = String::new();
     let res = session.infer(
         model,
         &mut rng,
         &llm::InferenceRequest {
             prompt: Prompt::Tokens(context),
-            parameters: &InferenceParameters {
-                sampler,
-                ..Default::default()
-            },
+            parameters: &InferenceParameters { sampler },
             play_back_previous_tokens: true,
             maximum_token_count: None,
         },
         // llm::OutputRequest
         &mut Default::default(),
-        |t| -> Result<InferenceFeedback, InferenceCallbackError> {
-            match &t {
-                InferenceResponse::InferredToken(t) | InferenceResponse::PromptToken(t) => {
-                    s.push_str(t);
-                }
-                _ => {}
-            }
-            Ok(InferenceFeedback::Continue)
-        },
+        callback,
     )?;
-    Ok((res, s))
+    Ok(res)
 }
 
 trait GetTokens<TokenId, Token> {
