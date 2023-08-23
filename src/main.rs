@@ -262,9 +262,10 @@ fn mode_encode<M: Model>(
         &context,
         key.resample_rng,
         model_type.callback(&mut s),
-        sampler,
+        sampler.clone(),
     )?;
     info!("Inference stats: {}", res);
+    info!("Encoder stats: {:?}", sampler.lock().unwrap().stats);
     println!("{}", "=".repeat(80));
     println!("{}", s);
     println!("{}", "=".repeat(80));

@@ -92,6 +92,21 @@ impl MeteorDecodeSampler {
 }
 
 #[derive(Debug)]
+pub struct MeteorEncodeStats {
+    pub num_tokens: usize,
+    pub num_bits_encoded: usize,
+}
+
+impl Default for MeteorEncodeStats {
+    fn default() -> Self {
+        MeteorEncodeStats {
+            num_tokens: 0,
+            num_bits_encoded: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
 /// A sampler based on TopKTopP. Instead of an rng, this will use hidden message ciphertexts to select a msg
 pub(crate) struct MeteorEncodeSampler {
     chain: SamplerChain,
@@ -103,6 +118,8 @@ pub(crate) struct MeteorEncodeSampler {
     ciphertext: BitVecSampler,
     /// the model's EOT token
     eot_token_id: TokenId,
+    /// stats
+    pub stats: MeteorEncodeStats,
 }
 
 impl MeteorEncodeSampler {
@@ -120,6 +137,7 @@ impl MeteorEncodeSampler {
             trie,
             ciphertext: BitVecSampler::new(msg, key_rng, pad_rng),
             eot_token_id,
+            stats: Default::default(),
         }
     }
 }
@@ -181,6 +199,9 @@ impl Sampler<u32, f32> for MeteorEncodeSampler {
             bits_remaining as i32 - num_bits_encoded as i32,
             self.ciphertext.offset,
         );
+
+        self.stats.num_tokens += 1;
+        self.stats.num_bits_encoded += num_bits_encoded;
 
         self.token_id = if tokens.len() == 1 {
             debug!("Simple distr: {}", tokens[0]);
