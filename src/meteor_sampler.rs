@@ -154,10 +154,6 @@ impl Sampler<u32, f32> for MeteorEncodeSampler {
             self.token_id = Some(self.eot_token_id);
             return Ok(logits);
         }
-        logits
-            .get_mut(self.eot_token_id as usize)
-            .expect("no EOT token")
-            .logit = f32::MIN;
         let logits = self.chain.sample(res, logits)?;
         logits.softmax()?;
         let token_ids: Vec<u32> = logits.iter().map(|l| l.token_id).collect();
@@ -247,10 +243,6 @@ impl Sampler<u32, f32> for MeteorDecodeSampler {
             self.token_id = Some(self.eot_token_id);
             return Ok(logits);
         }
-        logits
-            .get_mut(self.eot_token_id as usize)
-            .expect("no EOT token")
-            .logit = f32::MIN;
         let logits = self.chain.sample(res, logits)?;
         logits.softmax()?;
         let token_ids: Vec<u32> = logits.iter().map(|l| l.token_id).collect();
