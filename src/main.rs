@@ -264,8 +264,8 @@ fn mode_encode<M: Model>(
         model_type.callback(&mut s),
         sampler.clone(),
     )?;
-    info!("Inference stats: {}", res);
-    info!("Encoder stats: {:?}", sampler.lock().unwrap().stats);
+    println!("Inference stats: {}", res);
+    println!("Encoder stats: {:?}", sampler.lock().unwrap().stats);
     println!("{}", "=".repeat(80));
     println!("{}", s);
     println!("{}", "=".repeat(80));
@@ -341,7 +341,6 @@ fn mode_decode<M: Model>(
         }
     };
     println!("{}", recovered_msg);
-    assert_eq!(stego_text, recovered_stego);
     Ok(recovered_msg)
 }
 
