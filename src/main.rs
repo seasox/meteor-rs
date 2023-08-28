@@ -32,12 +32,30 @@ mod util;
 #[derive(Debug, Parser)]
 #[clap(version = "1.0", author = "Jeremy Boy <github@jboy.eu>")]
 struct CliArgs {
+    model_family: ModelFamily,
     #[arg(long)]
     model: String,
     #[command(subcommand)]
     mode: ProgramMode,
     #[clap(long)]
     model_type: ModelType,
+}
+
+#[derive(Clone, Debug, Parser)]
+enum ModelFamily {
+    GptJ,
+    Llama,
+}
+
+impl FromStr for ModelFamily {
+    type Err = fmt::Error;
+    fn from_str(s: &str) -> std::result::Result<Self, fmt::Error> {
+        match s.to_ascii_lowercase().as_str() {
+            "gptj" => Ok(ModelFamily::GptJ),
+            "llama" => Ok(ModelFamily::Llama),
+            _ => Err(std::fmt::Error),
+        }
+    }
 }
 
 #[derive(clap::Subcommand, Clone, Debug)]
@@ -157,48 +175,59 @@ fn main() -> Result<()> {
     debug!("args: {:?}", args);
     info!("Loading model {}", &args.model);
     let model_path = Path::new(&args.model);
-    let llama = llm::load::<llm::models::Llama>(
-        model_path,
-        TokenizerSource::Embedded,
-        ModelParameters {
-            use_gpu: true,
-            ..Default::default()
-        },
-        llm::load_progress_callback_stdout,
-    )?;
+    let model: Box<dyn Model> = match args.model_family {
+        ModelFamily::Llama => Box::new(llm::load::<llm::models::Llama>(
+            model_path,
+            TokenizerSource::Embedded,
+            ModelParameters {
+                use_gpu: true,
+                ..Default::default()
+            },
+            llm::load_progress_callback_stdout,
+        )?),
+        ModelFamily::GptJ => Box::new(llm::load::<llm::models::GptJ>(
+            model_path,
+            TokenizerSource::Embedded,
+            ModelParameters {
+                use_gpu: true,
+                ..Default::default()
+            },
+            llm::load_progress_callback_stdout,
+        )?),
+    };
     return match args.mode {
         ProgramMode::Inference { context } => {
             let rng = rand::thread_rng();
-            mode_inference(llama, &args.model_type, &context, rng)
+            mode_inference(&*model, &args.model_type, &context, rng)
         }
         ProgramMode::Encode {
             context,
             key_file,
             msg,
-        } => mode_encode(&llama, &args.model_type, &context, &key_file, &msg).map(|_| ()),
+        } => mode_encode(&*model, &args.model_type, &context, &key_file, &msg).map(|_| ()),
         ProgramMode::Decode {
             context,
             key_file,
             stego_text,
-        } => mode_decode(&llama, &args.model_type, &context, &key_file, &stego_text).map(|_| ()),
+        } => mode_decode(&*model, &args.model_type, &context, &key_file, &stego_text).map(|_| ()),
         ProgramMode::EncodeDecode {
             context,
             key_file,
             msg,
         } => mode_decode(
-            &llama,
+            &*model,
             &args.model_type,
             &context,
             &key_file,
-            &mode_encode(&llama, &args.model_type, &context, &key_file, &msg)?,
+            &mode_encode(&*model, &args.model_type, &context, &key_file, &msg)?,
         )
         .map(|_| ()),
-        ProgramMode::Reproduce => mode_reproduce(&llama).map(|_| ()),
+        ProgramMode::Reproduce => mode_reproduce(&*model).map(|_| ()),
     };
 }
 
-fn mode_inference<M: Model>(
-    model: M,
+fn mode_inference(
+    model: &dyn Model,
     model_type: &ModelType,
     user_context: &str,
     rng: impl Rng,
@@ -212,7 +241,7 @@ fn mode_inference<M: Model>(
         .collect();
     let mut s = String::new();
     let res = infer(
-        &model,
+        model,
         &context,
         rng,
         model_type.callback(&mut s),
@@ -223,8 +252,8 @@ fn mode_inference<M: Model>(
     Ok(())
 }
 
-fn mode_encode<M: Model>(
-    model: &M,
+fn mode_encode(
+    model: &dyn Model,
     model_type: &ModelType,
     context: &str,
     key_file: &str,
@@ -272,8 +301,8 @@ fn mode_encode<M: Model>(
     Ok(s)
 }
 
-fn mode_decode<M: Model>(
-    model: &M,
+fn mode_decode(
+    model: &dyn Model,
     model_type: &ModelType,
     context: &str,
     key_file: &str,
@@ -345,7 +374,7 @@ fn mode_decode<M: Model>(
 }
 
 struct Stats {}
-fn mode_reproduce<'a, M: Model>(model: &M) -> Result<Stats> {
+fn mode_reproduce<'a>(model: &dyn Model) -> Result<Stats> {
     let questions = vec![
         "What is the derivative of f(x)=x^2?",
         "What is the capital city of France?",
@@ -383,8 +412,8 @@ fn mode_reproduce<'a, M: Model>(model: &M) -> Result<Stats> {
     Ok(Stats {})
 }
 
-fn infer<M: Model>(
-    model: &M,
+fn infer(
+    model: &dyn Model,
     context: &[TokenId],
     mut rng: impl Rng,
     callback: impl FnMut(InferenceResponse) -> Result<InferenceFeedback, InferenceCallbackError>,
